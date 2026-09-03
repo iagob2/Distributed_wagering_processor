@@ -4,13 +4,13 @@
     "description": "Distributed Wagering Processor with Transactional Outbox and Strict Ledger",
     "private": true,
     "scripts": {
-        "build": "nest build",
+        "build": "tsc -p tsconfig.json",
         "format": "prettier --write \"src/**/*.ts\"",
         "start": "bun run src/main.ts",
         "start:dev": "nest start --watch",
-        "test": "bun test",
-        "test:watch": "bun test --watch",
-        "test:cov": "bun test --coverage"
+        "test": "bun test --path-ignore-patterns=dist/**",
+        "test:watch": "bun test --watch --path-ignore-patterns=dist/**",
+        "test:cov": "bun test --coverage --path-ignore-patterns=dist/**"
     },
     "dependencies": {
         "@aws-sdk/client-sqs": "^3.600.0",
@@ -22,6 +22,7 @@
         "@nestjs/config": "^3.2.2",
         "@nestjs/core": "^10.3.9",
         "@nestjs/platform-express": "^10.3.9",
+        "@nestjs/swagger": "^7.4.2",
         "@nestjs/terminus": "^10.2.3",
         "bignumber.js": "^9.1.2",
         "class-transformer": "^0.5.1",

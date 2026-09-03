@@ -16,6 +16,16 @@ export interface EvaluationResult {
     moneyToApply?: Money;
 }
 
+/**
+ * Avalia BET/WIN/LOSS/REFUND/ROLLBACK sem mutar estado.
+ * O use case aplica o resultado (debit/credit/reject/pending) sob lock da wallet.
+ *
+ * Integridade da máquina de estados:
+ * - REFUND só sobre BET PROCESSED; ROLLBACK sobre BET|WIN|REFUND
+ * - Anti double-reversal via alreadyReversedIds
+ * - Referência ausente → isPendingReference (worker assíncrono)
+ * - INSUFFICIENT_FUNDS ≠ INSUFFICIENT_FUNDS_FOR_REVERSAL (operações distintas)
+ */
 export class WagerRuleEngine {
     /**
      * Avalia a transação em relação à carteira e à referência opcional,

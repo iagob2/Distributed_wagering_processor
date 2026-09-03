@@ -1,4 +1,12 @@
--- Up Migration
+-- ============================================================================
+-- Distributed Wagering Processor — Migration inicial (Seção 5 / Seção 9 do desafio)
+-- Garantias no SCHEMA (não só no código):
+--   • CHECK (balance >= 0)
+--   • UNIQUE (player_id, currency)
+--   • UNIQUE (provider_id, external_transaction_id)
+--   • Ledger append-only via trigger BEFORE UPDATE OR DELETE
+--   • Aritmética DEBIT/CREDIT validada por CHECK
+-- ============================================================================
 
 -- Habilita extensão para geração de UUIDv4 nativo no PostgreSQL
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";

@@ -64,6 +64,11 @@ export class Wallet {
         return this._updatedAt;
     }
 
+    /**
+     * Débito com invariante de não-negatividade no domínio.
+     * Em concorrência, o caller DEVE ter adquirido SELECT ... FOR UPDATE na linha
+     * da wallet antes de reidratar e chamar este método — sem isso, lost update.
+     */
     public debit(amount: Money): WalletMutationResult {
         this.assertSameCurrency(amount);
 

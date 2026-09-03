@@ -8,7 +8,6 @@ import {
     Res,
     UseGuards,
     UseInterceptors,
-    HttpStatus,
     NotFoundException,
 } from '@nestjs/common';
 import type { Response } from 'express';

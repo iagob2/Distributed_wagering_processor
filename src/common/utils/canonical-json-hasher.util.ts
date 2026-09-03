@@ -2,8 +2,9 @@ import { createHash } from 'crypto';
 
 export class CanonicalJsonHasher {
     /**
-     * Ordena recursivamente as propriedades de um objeto e calcula o hash SHA-256.
-     * Garante determinismo independente da ordem de envio das chaves no JSON.
+     * Hash SHA-256 de JSON canônico (chaves ordenadas recursivamente).
+     * Usado na idempotência: mesma key + mesmo hash ⇒ replay; mesma key + hash
+     * diferente ⇒ conflito 409. Headers/transporte NÃO entram no payload.
      */
     public static hash(data: Record<string, unknown>): string {
         const canonicalString = this.stringifyCanonical(data);

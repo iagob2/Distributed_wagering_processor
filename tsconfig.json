@@ -9,7 +9,6 @@
         "target": "ES2022",
         "sourceMap": true,
         "outDir": "./dist",
-        "ignoreDeprecations": "6.0",
         "baseUrl": "./",
         "incremental": true,
         "skipLibCheck": true,
@@ -27,5 +26,10 @@
         "types": [
             "bun-types"
         ]
-    }
+    },
+    "exclude": [
+        "tests",
+        "dist",
+        "node_modules"
+    ]
 }

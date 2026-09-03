@@ -2,6 +2,11 @@ import { LedgerDirection } from '../entities/wallet-ledger-entry.entity';
 import { MoneyProps } from '../value-objects/money.vo';
 import { Wallet } from '../entities/wallet.entity';
 import { WalletLedgerEntry } from '../entities/wallet-ledger-entry.entity';
+import {
+    WagerTransaction,
+    WagerTransactionStatus,
+} from '../entities/wager-transaction.entity';
+import { FailureCode } from '../wager/failure-code';
 
 export interface EventContext {
     correlationId: string;
@@ -17,6 +22,10 @@ export interface IntegrationEventProps<T> {
     data: T;
 }
 
+/**
+ * Envelope tipado de integração. Subclasses fixam eventType/version no tipo —
+ * evita strings soltas no call site e mantém payloads JSON versionáveis.
+ */
 export abstract class IntegrationEvent<T> {
     abstract readonly eventType: string;
     abstract readonly version: number;
@@ -70,6 +79,7 @@ export interface WalletBalanceChangedData {
     walletVersion: number;
 }
 
+/** Emitido somente quando o saldo materializado muda (BET/WIN/REFUND/ROLLBACK aplicados). */
 export class WalletBalanceChanged extends IntegrationEvent<WalletBalanceChangedData> {
     public readonly eventType = 'WalletBalanceChanged';
     public readonly version = 1;
@@ -93,6 +103,119 @@ export class WalletBalanceChanged extends IntegrationEvent<WalletBalanceChangedD
                 balanceBefore: entry.balanceBefore.toJSON(),
                 balanceAfter: entry.balanceAfter.toJSON(),
                 walletVersion: wallet.version,
+            },
+        });
+    }
+}
+
+export interface WagerTransactionProcessedData {
+    transactionId: string;
+    providerId: string;
+    externalTransactionId: string;
+    walletId: string;
+    kind: string;
+    status: WagerTransactionStatus;
+    money: MoneyProps;
+    balance: MoneyProps;
+}
+
+export class WagerTransactionProcessed extends IntegrationEvent<WagerTransactionProcessedData> {
+    public readonly eventType = 'WagerTransactionProcessed';
+    public readonly version = 1;
+
+    public static from(
+        tx: WagerTransaction,
+        wallet: Wallet,
+        ctx: EventContext,
+    ): WagerTransactionProcessed {
+        return new WagerTransactionProcessed({
+            eventId: crypto.randomUUID(),
+            aggregateId: tx.id,
+            correlationId: ctx.correlationId,
+            causationId: ctx.causationId,
+            occurredAt: new Date(),
+            data: {
+                transactionId: tx.id,
+                providerId: tx.providerId,
+                externalTransactionId: tx.externalTransactionId,
+                walletId: tx.walletId,
+                kind: tx.kind,
+                status: tx.status,
+                money: tx.money.toJSON(),
+                balance: wallet.balance.toJSON(),
+            },
+        });
+    }
+}
+
+export interface WagerTransactionRejectedData {
+    transactionId: string;
+    providerId: string;
+    externalTransactionId: string;
+    walletId: string;
+    kind: string;
+    failureCode: FailureCode;
+    money: MoneyProps;
+}
+
+export class WagerTransactionRejected extends IntegrationEvent<WagerTransactionRejectedData> {
+    public readonly eventType = 'WagerTransactionRejected';
+    public readonly version = 1;
+
+    public static from(
+        tx: WagerTransaction,
+        failureCode: FailureCode,
+        ctx: EventContext,
+    ): WagerTransactionRejected {
+        return new WagerTransactionRejected({
+            eventId: crypto.randomUUID(),
+            aggregateId: tx.id,
+            correlationId: ctx.correlationId,
+            causationId: ctx.causationId,
+            occurredAt: new Date(),
+            data: {
+                transactionId: tx.id,
+                providerId: tx.providerId,
+                externalTransactionId: tx.externalTransactionId,
+                walletId: tx.walletId,
+                kind: tx.kind,
+                failureCode,
+                money: tx.money.toJSON(),
+            },
+        });
+    }
+}
+
+export interface WagerTransactionPendingReferenceData {
+    transactionId: string;
+    providerId: string;
+    externalTransactionId: string;
+    referenceExternalTransactionId: string;
+    walletId: string;
+    kind: string;
+}
+
+export class WagerTransactionPendingReference extends IntegrationEvent<WagerTransactionPendingReferenceData> {
+    public readonly eventType = 'WagerTransactionPendingReference';
+    public readonly version = 1;
+
+    public static from(
+        tx: WagerTransaction,
+        ctx: EventContext,
+    ): WagerTransactionPendingReference {
+        return new WagerTransactionPendingReference({
+            eventId: crypto.randomUUID(),
+            aggregateId: tx.id,
+            correlationId: ctx.correlationId,
+            causationId: ctx.causationId,
+            occurredAt: new Date(),
+            data: {
+                transactionId: tx.id,
+                providerId: tx.providerId,
+                externalTransactionId: tx.externalTransactionId,
+                referenceExternalTransactionId: tx.referenceExternalTransactionId!,
+                walletId: tx.walletId,
+                kind: tx.kind,
             },
         });
     }

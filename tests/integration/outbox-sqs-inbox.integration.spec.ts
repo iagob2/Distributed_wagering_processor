@@ -6,6 +6,7 @@ import { OutboxEventDbEntity } from '../../src/infrastructure/database/entities/
 import { InboxMessageDbEntity } from '../../src/infrastructure/database/entities/inbox-message.db-entity';
 import { WalletDbEntity } from '../../src/infrastructure/database/entities/wallet.db-entity';
 import { OutboxPublisherWorker } from '../../src/infrastructure/messaging/outbox-publisher.worker';
+import { MetricsService } from '../../src/common/metrics/metrics.service';
 import { randomUUID } from 'crypto';
 
 describe('Integration: Outbox -> SQS -> Inbox Pattern', () => {
@@ -13,8 +14,8 @@ describe('Integration: Outbox -> SQS -> Inbox Pattern', () => {
     let em: EntityManager;
     let sqsClient: SQSClient;
     const queueUrl =
-        process.env.SQS_MAIN_QUEUE_URL ||
-        'http://localhost:4566/000000000000/wager-transactions.fifo';
+        process.env.SQS_EVENTS_QUEUE_URL ||
+        'http://localhost:4566/000000000000/wager-events.fifo';
 
     beforeAll(async () => {
         try {
@@ -64,6 +65,7 @@ describe('Integration: Outbox -> SQS -> Inbox Pattern', () => {
     it('deve persistir evento na Outbox e despachar com sucesso para o SQS via SKIP LOCKED', async () => {
         const eventId = randomUUID();
         const aggregateId = randomUUID();
+        const testDate = new Date(0);
 
         const event = em.create(OutboxEventDbEntity, {
             id: eventId,
@@ -74,15 +76,15 @@ describe('Integration: Outbox -> SQS -> Inbox Pattern', () => {
                 amount: '50.00',
                 currency: 'BRL',
             },
-            occurredAt: new Date(),
+            occurredAt: testDate,
             attempts: 0,
-            nextAttemptAt: new Date(),
-            createdAt: new Date(),
+            nextAttemptAt: testDate,
+            createdAt: testDate,
         });
 
         await em.persistAndFlush(event);
 
-        const publisher = new OutboxPublisherWorker(em, sqsClient);
+        const publisher = new OutboxPublisherWorker(em, sqsClient, new MetricsService());
         const publishedCount = await publisher.publishPendingBatch();
 
         expect(publishedCount).toBeGreaterThanOrEqual(1);

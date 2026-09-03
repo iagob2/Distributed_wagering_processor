@@ -9,7 +9,7 @@ echo "=============================================="
 awslocal sqs create-queue \
   --queue-name wager-transactions-dlq.fifo \
   --attributes FifoQueue=true,ContentBasedDeduplication=true
-S
+
 # 2. Obtém o ARN da DLQ
 DLQ_ARN=$(awslocal sqs get-queue-attributes \
   --queue-url http://localhost:4566/000000000000/wager-transactions-dlq.fifo \
@@ -24,7 +24,7 @@ awslocal sqs create-queue \
   --queue-name wager-transactions.fifo \
   --attributes "{\"FifoQueue\":\"true\",\"ContentBasedDeduplication\":\"true\",\"RedrivePolicy\":\"{\\\"deadLetterTargetArn\\\":\\\"${DLQ_ARN}\\\",\\\"maxReceiveCount\\\":\\\"5\\\"}\"}"
 
-# 4. Cria a fila para eventos da Outbox
+# 4. Cria a fila para eventos da Outbox (separada da ingestão de apostas)
 awslocal sqs create-queue \
   --queue-name wager-events.fifo \
   --attributes FifoQueue=true,ContentBasedDeduplication=true

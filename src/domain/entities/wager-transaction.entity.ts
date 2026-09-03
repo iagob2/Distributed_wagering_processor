@@ -1,5 +1,6 @@
 import { InvalidTransactionStateError } from '../errors/domain.error';
 import { Money } from '../value-objects/money.vo';
+import { FailureCode } from '../wager/failure-code';
 
 export enum WagerTransactionKind {
     Opening = 'OPENING',
@@ -18,29 +19,7 @@ export enum WagerTransactionStatus {
     Failed = 'FAILED',
 }
 
-
-
-export type FailureCode =
-    | 'INSUFFICIENT_FUNDS'
-    | 'INSUFFICIENT_FUNDS_FOR_REVERSAL'
-    | 'REFERENCE_NOT_FOUND'
-    | 'REFERENCE_NOT_PROCESSED'
-    | 'REFERENCE_ALREADY_REVERSED'
-    | 'INVALID_REFERENCE_METADATA'
-    | 'INVALID_REFUND_TARGET'
-    | 'INVALID_ROLLBACK_TARGET'
-    | 'IDEMPOTENCY_PAYLOAD_MISMATCH'
-    | 'UNSUPPORTED_OPERATION'
-    | 'SYSTEM_CONCURRENCY_TIMEOUT'
-    | 'SYSTEM_ERROR'
-    | 'TRANSACTION_NOT_FOUND'
-    | 'INVALID_ROUND_STATE'
-    | 'CURRENCY_MISMATCH'
-    | 'REFERENCE_ALREADY_REVERTED'
-    | 'REFERENCE_MISMATCH'
-    | 'SYSTEM_ERROR';
-
-
+export type { FailureCode };
 
 export interface CreateWagerTransactionProps {
     id: string;

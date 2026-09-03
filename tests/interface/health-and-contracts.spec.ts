@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'bun:test';
 import { MetricsService } from '../../src/common/metrics/metrics.service';
-import { CanonicalJsonHasher } from '../../src/common/utils/canonical-json-hasher.util';
 
 describe('HTTP Layer & Contracts Validation', () => {
     it('deve registrar métricas e exportar formato legível pelo Prometheus', async () => {

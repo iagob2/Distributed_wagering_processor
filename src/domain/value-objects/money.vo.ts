@@ -54,7 +54,11 @@ export class Money {
         return new Money(new Decimal('0.00'), currency.toUpperCase());
     }
 
-    public static fromCents(cents: bigint | number | string, currency: string): Money {
+    /**
+     * Reconstrução a partir de BIGINT do PostgreSQL.
+     * Aceita apenas bigint|string — nunca `number` (IEEE-754) para dinheiro.
+     */
+    public static fromCents(cents: bigint | string, currency: string): Money {
         const decimal = new Decimal(cents.toString()).dividedBy(100);
         return new Money(decimal, currency.toUpperCase());
     }

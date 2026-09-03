@@ -1,184 +1,189 @@
-# Distributed Wagering Processor 🦧
+# Distributed Wagering Processor
 
-Motor financeiro distribuído de alta disponibilidade e consistência estrita para plataformas de iGaming, construído com **NestJS**, **Bun 1.x**, **PostgreSQL** e **AWS SQS (LocalStack)**.
+Serviço financeiro distribuído para iGaming, desenvolvido para o desafio técnico da Jungle Gaming. A implementação prioriza correção monetária, concorrência por carteira, idempotência persistente, ledger auditável e mensageria resiliente.
 
-O sistema processa transações de apostas com correção monetária de ponto fixo, isolamento concorrente por carteira via locks pessimistas, livro-razão (*ledger*) puramente cumulativo (*append-only*), idempotência persistente e mensageria tolerante a falhas baseada nos padrões **Transactional Outbox** e **Inbox Pattern**.
+## Stack
 
----
+| Camada | Tecnologia |
+|---|---|
+| Runtime, package manager e testes | Bun 1.x |
+| Linguagem | TypeScript strict |
+| Framework | NestJS 10 |
+| ORM | MikroORM 6 |
+| Banco | PostgreSQL 16 |
+| Mensageria | AWS SQS via LocalStack |
+| Identidade | Zitadel como extensão OIDC opcional |
 
-## 1. Pré-requisitos
+## Pré-requisitos
 
-- **Bun:** `v1.1.x` ou superior instalado localmente.
-- **Docker & Docker Compose:** Docker `v24+` e Compose `v2+`.
-- **Git:** Para clonagem e versionamento.
+- Bun 1.x
+- Docker Desktop com Compose v2
+- Portas livres `3000`, `5432`, `4566` e `8080`
 
----
+## Quickstart
 
-## 2. Instruções de Setup Local
+### 1. Instalar dependências
 
-### Passo 1: Clonar o Repositório e Instalar Dependências
-
-```bash
-git clone [https://github.com/SEU_USUARIO/distributed-wagering-processor.git](https://github.com/SEU_USUARIO/distributed-wagering-processor.git)
-cd distributed-wagering-processor
+```powershell
 bun install
+Copy-Item .env.example .env
 ```
 
-### Passo 2: Configurar Variáveis de Ambiente
-
-Copie o arquivo de exemplo para o ambiente de desenvolvimento:
+No Linux/macOS:
 
 ```bash
+bun install
 cp .env.example .env
 ```
 
-### Passo 3: Inicializar a Infraestrutura em Containers
-
-Suba os serviços locais (PostgreSQL e LocalStack SQS):
+### 2. Subir a infraestrutura
 
 ```bash
 docker compose up -d
-```
-
-Verifique a saúde dos serviços:
-
-```bash
 docker ps
 ```
 
-Aguarde até que os contêineres `wagering-postgres` e `wagering-localstack` estejam com status `healthy`.
+Aguarde `wagering-postgres` e `wagering-localstack` com status `healthy`. O `wagering-zitadel` é um ponto de extensão opcional para autenticação OIDC.
 
-### Passo 4: Executar as Migrations do Banco de Dados
+### 3. Aplicar a migration
 
-Aplique o schema relacional, constraints e triggers no PostgreSQL:
+Execute uma vez, depois que o PostgreSQL estiver saudável.
 
-#### Windows (PowerShell)
+Windows PowerShell:
 
 ```powershell
-Get-Content infra/database/migrations/001_initial_schema.sql | docker exec -i wagering-postgres psql -U postgres -d wagering_db
+Get-Content src/infrastructure/database/migrations/001_initial_schema.sql | docker exec -i wagering-postgres psql -U postgres -d wagering_db
 ```
 
-#### Linux/macOS (Bash)
+Linux/macOS:
 
 ```bash
-docker exec -i wagering-postgres psql -U postgres -d wagering_db < infra/database/migrations/001_initial_schema.sql
+docker exec -i wagering-postgres psql -U postgres -d wagering_db < src/infrastructure/database/migrations/001_initial_schema.sql
 ```
 
-### Passo 5: Iniciar a Aplicação
+A migration aplica `BIGINT` para centavos, `CHECK (balance >= 0)`, unicidade de wallet por `(player_id, currency)`, unicidade de transação por `(provider_id, external_transaction_id)`, constraints aritméticas do ledger e trigger contra `UPDATE`/`DELETE` no ledger.
+
+### 4. Iniciar a API
 
 ```bash
 bun run start
 ```
 
-A API inicializará na porta 3000.
+Endpoints locais:
 
-## 3. Guia de Execução de Testes
+- Swagger: http://localhost:3000/docs
+- Liveness: http://localhost:3000/health/live
+- Readiness: http://localhost:3000/health/ready
+- Métricas: http://localhost:3000/metrics
 
-Todas as suítes de testes foram projetadas para validar desde o modelo de domínio isolado até concorrência com instâncias reais de containers (sem mocks de banco ou mensageria).
+Se aparecer `EADDRINUSE`, encerre a instância anterior do Bun ou libere a porta `3000` antes de executar novamente.
 
-### Testes Unitários de Domínio
-
-Valida o Value Object Money, Aggregate Root Wallet, máquina de estados de WagerTransaction e equações contábeis do WalletLedgerEntry:
-
-```bash
-bun test tests/domain/
-```
-
-### Testes de Integração Real (PostgreSQL + SQS LocalStack)
-
-Testa a atomicidade do ciclo Outbox $\rightarrow$ SQS FIFO $\rightarrow$ Inbox deduplicado:
+## Build e testes
 
 ```bash
-bun test tests/integration/outbox-sqs-inbox.integration.spec.ts
+# Compilação sem gerar testes em dist/
+bun run build
+
+# Suíte completa: domínio, integração, interface e concorrência
+bun test
+
+# Domínio e regras financeiras
+bun test tests/domain
+
+# Hash canônico
+bun test tests/common
+
+# PostgreSQL + LocalStack
+bun test tests/integration
+
+# Concorrência real com banco e pool de conexões
+bun test tests/concurrency
 ```
 
-### Testes de Concorrência Extrema (Stress & Race Conditions)
+A suíte validada localmente contém 34 testes e cobre:
 
-Executa rajadas concorrentes reais (Promise.all) contra o PostgreSQL:
+- `Money`, `Wallet`, máquina de estados e regras `BET/WIN/LOSS/REFUND/ROLLBACK`;
+- disputa de duas apostas de `80.00` sobre saldo `100.00`;
+- rajada de 50 requisições com a mesma idempotency key;
+- Outbox, SQS e Inbox;
+- reconciliação entre saldo materializado e ledger.
 
-- Disputa de Saldo: 2 apostas simultâneas de R$ 80 contra saldo inicial de R$ 100.
-- Burst Idempotente: 50 requisições simultâneas com a mesma Idempotency-Key.
+O script `bun run build` usa `tsc` diretamente e exclui `tests/`, evitando que o Bun execute cópias compiladas dos testes.
+
+## Smoke tests HTTP
+
+### Health
 
 ```bash
-bun test tests/concurrency/
+curl -s http://localhost:3000/health/live
+curl -s http://localhost:3000/health/ready
 ```
 
-### Teste de Carga Diferencial (Throughput & Latência)
+### Criar carteira
 
-Executa rajadas de alto volume medindo percentis P50, P95 e P99:
+Use um `playerId` novo para cada execução, pois existe uma wallet por jogador e moeda.
 
 ```bash
-bun run test:load
+curl -s -X POST http://localhost:3000/wallets \
+  -H "Content-Type: application/json" \
+  -d '{
+    "playerId": "jogador-smoke-001",
+    "initialBalance": { "amount": "100.00", "currency": "BRL" }
+  }'
 ```
 
-## 4. Endpoints Principais da API
+Copie o campo `id` retornado e defina-o como `WALLET_ID`.
 
-### Carteiras (`/wallets`)
+PowerShell:
 
-#### Criar Carteira: `POST /wallets`
-
-```json
-{
-  "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
-  "initialBalance": { "amount": "100.00", "currency": "BRL" }
-}
+```powershell
+$walletId = "COLE_O_ID_DA_CARTEIRA"
+$playerId = "jogador-smoke-001"
 ```
 
-Retorno (201 Created):
+### Submeter uma aposta
 
-```json
-{
-  "id": "0192f291-27dd-7d3f-8071-5f8685deef37",
-  "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
-  "balance": { "amount": "100.00", "currency": "BRL" },
-  "version": 1
-}
+```bash
+curl -s -X POST http://localhost:3000/wagering/transactions \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: provider-smoke:tx-001" \
+  -d '{
+    "providerId": "provider-smoke",
+    "externalTransactionId": "tx-001",
+    "playerId": "jogador-smoke-001",
+    "walletId": "WALLET_ID",
+    "roundId": "round-smoke-001",
+    "gameId": "fortune-chimp",
+    "kind": "BET",
+    "money": { "amount": "30.00", "currency": "BRL" }
+  }'
 ```
 
-#### Consultar Carteira: `GET /wallets/:walletId`
+A resposta esperada é `200`, com status `PROCESSED`, saldo `70.00` e `idempotentReplay: false`. Repetir a mesma chamada deve retornar a resposta original com `idempotentReplay: true`.
 
-#### Extrato Contábil com Paginação por Cursor
+### Consultar ledger e reconciliação
 
-`GET /wallets/:walletId/ledger?limit=50&cursor=...`
-
-#### Auditoria e Reconciliação Matemática
-
-`POST /wallets/:walletId/reconciliation`
-
-### Apostas e Liquidação (`/wagering`)
-
-#### Submeter Transação Financeira: `POST /wagering/transactions`
-
-Header Obrigatório: `Idempotency-Key: provider-a:tx-1001`
-
-```json
-{
-  "providerId": "provider-a",
-  "externalTransactionId": "tx-1001",
-  "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
-  "walletId": "0192f291-27dd-7d3f-8071-5f8685deef37",
-  "roundId": "round-987",
-  "gameId": "fortune-tiger",
-  "kind": "BET",
-  "money": { "amount": "25.00", "currency": "BRL" }
-}
+```bash
+curl -s "http://localhost:3000/wallets/WALLET_ID/ledger?limit=50"
+curl -s -X POST http://localhost:3000/wallets/WALLET_ID/reconciliation
 ```
 
-Retorno (200 OK):
+A reconciliação deve retornar `consistent: true`, saldo armazenado `70.00`, saldo calculado `70.00` e dois lançamentos: abertura `CREDIT` e aposta `DEBIT`.
 
-```json
-{
-  "transactionId": "0192f298-345e-7e38-af88-e43f851a819d",
-  "status": "PROCESSED",
-  "balance": { "amount": "75.00", "currency": "BRL" },
-  "idempotentReplay": false
-}
+## Autenticação
+
+A Seção 2 do desafio não pontua autenticação. O comportamento padrão local usa `NoopAuthGuard`, deixando o motor testável sem depender de token.
+
+Existe uma extensão `JwtAuthGuard` baseada em JWKS RS256 e configuração Zitadel no Compose. Para ativá-la em um ambiente real, substitua o guard nos controllers, configure `IDP_ISSUER`/`IDP_JWKS_URI` e gere credenciais na mesma instância Zitadel. Credenciais de outra instância retornam `invalid_client`.
+
+## Organização
+
+```text
+src/domain/           regras puras, Money, Wallet, ledger e WagerRuleEngine
+src/application/      use cases e workers
+src/infrastructure/   entidades MikroORM, migration, SQS e Outbox
+src/interface/http/   controllers e DTOs
+tests/                 domínio, integração, interface e concorrência
 ```
 
-#### Consultar Transação: `GET /wagering/transactions/:transactionId`
-
-## Observabilidade e Telemetria
-
-- **Liveness Probe:** `GET /health/live` (Retorna 200 OK se o processo estiver ativo).
-- **Readiness Probe:** `GET /health/ready` (Valida conectividade real com PostgreSQL e SQS; retorna 503 se degradado).
-- **Métricas Prometheus:** `GET /metrics` (Exposição de contadores, gauges e histogramas em tempo real).
+As decisões, invariantes, trade-offs e limitações estão em [`ARCHITECTURE.md`](./ARCHITECTURE.md).

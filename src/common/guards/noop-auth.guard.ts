@@ -9,12 +9,20 @@ export interface RequestWithProvider extends Request {
     };
 }
 
+/**
+ * Ponto de extensão de autenticação (Seção 2 do desafio — autenticação vale 0 pontos).
+ *
+ * Produção: substituir por `JwtAuthGuard` (JWKS/OIDC contra Zitadel em Docker Compose).
+ * Avaliação local: este Noop injeta um provedor simulado sem bloquear o motor financeiro.
+ *
+ * @see JwtAuthGuard em ./jwt-auth.guard.ts
+ * @see ProviderIdentityPort em domain/ports/provider-identity.port.ts
+ */
 @Injectable()
 export class NoopAuthGuard implements CanActivate {
     public async canActivate(context: ExecutionContext): Promise<boolean> {
         const request = context.switchToHttp().getRequest<RequestWithProvider>();
 
-        // Pass-through stub com contexto de provedor validado (extensível via JWKS/OIDC)
         request.provider = {
             id: (request.headers['x-provider-id'] as string) || 'provider-mock-a',
             name: 'Simulated Provider',

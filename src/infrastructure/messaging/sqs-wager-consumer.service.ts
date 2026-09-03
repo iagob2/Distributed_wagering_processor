@@ -16,6 +16,7 @@ import { SubmitWagerTransactionService } from '../../application/services/submit
 import { InboxMessageDbEntity } from '../database/entities/inbox-message.db-entity';
 import { CanonicalJsonHasher } from '../../common/utils/canonical-json-hasher.util';
 import { WagerTransactionKind } from '../../domain/entities/wager-transaction.entity';
+import { MetricsService } from '../../common/metrics/metrics.service';
 
 export interface SqsMessageEnvelope {
     messageId: string;
@@ -38,6 +39,15 @@ export interface SqsMessageEnvelope {
     };
 }
 
+/**
+ * Consumidor at-least-once da fila de ingestão.
+ *
+ * Garantias:
+ * - Dedup persistente via inbox (consumerName, messageId)
+ * - Inbox + efeito financeiro na MESMA TX SQL (passa EntityManager ao use case)
+ * - ACK (DeleteMessage) somente após commit bem-sucedido
+ * - Erros de negócio → ACK (terminal); transitórios → visibility retry → DLQ LocalStack
+ */
 @Injectable()
 export class SqsWagerConsumerService implements OnModuleInit, OnModuleDestroy {
     private readonly logger = new Logger(SqsWagerConsumerService.name);
@@ -45,6 +55,7 @@ export class SqsWagerConsumerService implements OnModuleInit, OnModuleDestroy {
     private readonly queueUrl =
         process.env.SQS_MAIN_QUEUE_URL ||
         'http://localhost:4566/000000000000/wager-transactions.fifo';
+    private readonly dlqName = 'wager-transactions-dlq.fifo';
 
     private isRunning = false;
     private activeJobs = 0;
@@ -53,14 +64,16 @@ export class SqsWagerConsumerService implements OnModuleInit, OnModuleDestroy {
         private readonly sqsClient: SQSClient,
         private readonly em: EntityManager,
         private readonly submitService: SubmitWagerTransactionService,
+        private readonly metrics: MetricsService,
     ) { }
 
     public onModuleInit(): void {
         this.isRunning = true;
-        this.poll();
+        void this.poll();
     }
 
     public async onModuleDestroy(): Promise<void> {
+        this.logger.log('SIGTERM/shutdown: aguardando jobs SQS em andamento...');
         this.isRunning = false;
         const deadline = Date.now() + 10000;
         while (this.activeJobs > 0 && Date.now() < deadline) {
@@ -77,6 +90,7 @@ export class SqsWagerConsumerService implements OnModuleInit, OnModuleDestroy {
                         MaxNumberOfMessages: 5,
                         WaitTimeSeconds: 10,
                         VisibilityTimeout: 30,
+                        MessageSystemAttributeNames: ['ApproximateReceiveCount'],
                     }),
                 );
 
@@ -100,28 +114,17 @@ export class SqsWagerConsumerService implements OnModuleInit, OnModuleDestroy {
 
             let envelope: SqsMessageEnvelope;
             try {
-                envelope = JSON.parse(message.Body);
+                envelope = JSON.parse(message.Body) as SqsMessageEnvelope;
             } catch {
-                // Se for um JSON inválido ou evento sem o formato esperado, descarta (ACK)
                 this.logger.warn(`Mensagem malformada ${message.MessageId}. Descartando.`);
-                await this.sqsClient.send(
-                    new DeleteMessageCommand({
-                        QueueUrl: this.queueUrl,
-                        ReceiptHandle: message.ReceiptHandle,
-                    }),
-                );
+                await this.ack(message.ReceiptHandle);
                 return;
             }
 
-            if (!envelope.data || !envelope.data.walletId) {
-                // Mensagem de evento outbox publicada por engano na fila de entrada de apostas -> ACK
-                this.logger.warn(`Mensagem sem dados de aposta ${message.MessageId}. Descartando.`);
-                await this.sqsClient.send(
-                    new DeleteMessageCommand({
-                        QueueUrl: this.queueUrl,
-                        ReceiptHandle: message.ReceiptHandle,
-                    }),
-                );
+            // Eventos de outbox não devem ser reprocessados como apostas.
+            if (!envelope.data?.walletId || !envelope.data?.idempotencyKey) {
+                this.logger.warn(`Envelope sem payload de aposta ${message.MessageId}. ACK.`);
+                await this.ack(message.ReceiptHandle);
                 return;
             }
 
@@ -138,41 +141,44 @@ export class SqsWagerConsumerService implements OnModuleInit, OnModuleDestroy {
                 });
 
                 if (existingInbox) {
+                    this.metrics.duplicateTransactionsTotal.inc({
+                        provider: envelope.data.providerId ?? 'sqs',
+                    });
                     return;
                 }
 
-                await this.submitService.execute(envelope.data.idempotencyKey, envelope.data);
-
-                const inboxDb = txEm.create(InboxMessageDbEntity, {
-                    messageId: envelope.messageId,
-                    consumerName: this.consumerName,
-                    payloadHash,
-                    receivedAt: new Date(),
-                    processedAt: new Date(),
+                // Mesma TX: efeitos financeiros + registro de inbox (anti dual-write).
+                await this.submitService.execute(envelope.data.idempotencyKey, envelope.data, {
+                    entityManager: txEm,
+                    correlationId: envelope.messageId,
                 });
 
-                txEm.persist(inboxDb);
-            });
-
-            await this.sqsClient.send(
-                new DeleteMessageCommand({
-                    QueueUrl: this.queueUrl,
-                    ReceiptHandle: message.ReceiptHandle,
-                }),
-            );
-        } catch (err: unknown) {
-            const error = err as { code?: string; status?: number; message?: string };
-            this.logger.error(`Falha ao processar mensagem ${message.MessageId}: ${error.message}`);
-
-            // Erros de negócio, carteira não encontrada (404) ou conflitos sofrem ACK para não travar a fila
-            if (this.isTerminalBusinessError(error)) {
-                await this.sqsClient.send(
-                    new DeleteMessageCommand({
-                        QueueUrl: this.queueUrl,
-                        ReceiptHandle: message.ReceiptHandle!,
+                txEm.persist(
+                    txEm.create(InboxMessageDbEntity, {
+                        messageId: envelope.messageId,
+                        consumerName: this.consumerName,
+                        payloadHash,
+                        receivedAt: new Date(),
+                        processedAt: new Date(),
                     }),
                 );
+            });
+
+            await this.ack(message.ReceiptHandle);
+        } catch (err: unknown) {
+            const error = err as { code?: string; status?: number; message?: string; getStatus?: () => number };
+            const status = error.status ?? (typeof error.getStatus === 'function' ? error.getStatus() : undefined);
+            this.logger.error(`Falha ao processar ${message.MessageId}: ${error.message}`);
+
+            if (this.isTerminalBusinessError({ ...error, status })) {
+                await this.ack(message.ReceiptHandle!);
             } else {
+                this.metrics.transactionRetriesTotal.inc({ kind: 'sqs_redelivery' });
+                // ReceiveCount → DLQ após maxReceiveCount=5 no LocalStack.
+                const receiveCount = Number(message.Attributes?.ApproximateReceiveCount ?? '1');
+                if (receiveCount >= 5) {
+                    this.metrics.dlqMessagesTotal.inc({ queue_name: this.dlqName });
+                }
                 await this.sqsClient.send(
                     new ChangeMessageVisibilityCommand({
                         QueueUrl: this.queueUrl,
@@ -184,6 +190,15 @@ export class SqsWagerConsumerService implements OnModuleInit, OnModuleDestroy {
         } finally {
             this.activeJobs--;
         }
+    }
+
+    private async ack(receiptHandle: string): Promise<void> {
+        await this.sqsClient.send(
+            new DeleteMessageCommand({
+                QueueUrl: this.queueUrl,
+                ReceiptHandle: receiptHandle,
+            }),
+        );
     }
 
     private isTerminalBusinessError(error: { code?: string; status?: number }): boolean {
@@ -200,6 +215,7 @@ export class SqsWagerConsumerService implements OnModuleInit, OnModuleDestroy {
 
         return (
             (error.code !== undefined && terminalCodes.includes(error.code)) ||
+            error.status === 400 ||
             error.status === 404 ||
             error.status === 409 ||
             error.status === 422

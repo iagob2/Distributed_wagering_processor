@@ -1,191 +1,173 @@
-# Architecture Decision Records & System Design Document
+# Architecture Decision Records — Distributed Wagering Processor
 
-**Serviço:** Distributed Wagering Processor  
-**Domínio:** Financial Ledger & iGaming Engine  
-**Versão:** 1.0.0  
+Este documento explica as decisões técnicas do desafio **Distributed Wagering Processor** da Jungle Gaming e registra as garantias, trade-offs e limitações verificadas no código.
 
----
-
-## 1. Visão Sistêmica da Arquitetura
-
-O sistema adota os preceitos de **Domain-Driven Design (DDD)** e **Clean Architecture**, segregando regras de negócio invioláveis de frameworks e adaptadores de entrada/saída.
+## 1. Visão sistêmica
 
 ```text
-                 ┌─────────────────────────────────────────┐
-                 │          Canais de Ingestão             │
-                 │  - HTTP REST Controllers                │
-                 │  - SQS Consumer (wager-transactions)    │
-                 └────────────────────┬────────────────────┘
-                                      │
-                                      ▼
-                 ┌─────────────────────────────────────────┐
-                 │       Camada de Aplicação (Use Cases)   │
-                 │  - SubmitWagerTransactionService        │
-                 │  - CanonicalJsonHasher                  │
-                 │  - PendingReferenceWorker               │
-                 └────────────────────┬────────────────────┘
-                                      │
-                 ┌────────────────────┴────────────────────┐
-                 ▼                                         ▼
-  ┌─────────────────────────────┐           ┌─────────────────────────────┐
-  │      Core Domain (Puro)     │           │   Infraestrutura & Banco    │
-  │  - Money (Value Object)     │           │  - PostgreSQL 16 (ACID)     │
-  │  - Wallet (Aggregate Root)  │◄─────────►│  - MikroORM (Unit of Work)  │
-  │  - WagerRuleEngine          │           │  - Transactional Outbox     │
-  │  - WalletLedgerEntry        │           │  - Inbox Deduplication      │
-  └─────────────────────────────┘           └─────────────────────────────┘
+HTTP ───────────────┐
+                    ├── SubmitWagerTransactionService ── PostgreSQL
+SQS consumer ───────┘       ├── idempotency_keys
+                             ├── wallet FOR UPDATE
+                             ├── wager_transactions
+                             ├── ledger_entries
+                             └── outbox_events ── publisher ── wager-events.fifo
+
+wager-transactions.fifo ── consumer ── inbox_messages
 ```
 
-### Invariantes Globais do Sistema
+O domínio é isolado de NestJS, MikroORM e SQS. Controllers e consumers são adaptadores; o caso de uso financeiro é compartilhado entre HTTP e SQS.
 
-- **Não-Negatividade:** Saldo jamais fica negativo em nenhuma hipótese.
-- **Conservação Financeira:** O saldo materializado da carteira equivale matematicamente à soma dos lançamentos do ledger:
+## 2. Auditoria das restrições eliminatórias
 
-  $$\text{wallet.balance} \equiv \sum \text{Créditos} - \sum \text{Débitos}$$
+| Restrição | Status | Evidência |
+|---|---|---|
+| Sem `number`, `float` ou `double` para dinheiro | Conforme | `Money` usa `Decimal.js`; persistência e cálculos de infraestrutura usam centavos em `BIGINT`/`bigint`. |
+| Idempotência não depende de memória | Conforme | `idempotency_keys` persistente, hash canônico e advisory lock transacional por chave. |
+| SQS não é a garantia financeira | Conforme | A decisão financeira ocorre no PostgreSQL, antes do ACK, com idempotência e locks. |
+| Eventos somente após commit | Conforme | Eventos são gravados na Outbox na mesma transação; o publisher envia depois do commit. |
+| Ledger imutável | Conforme | Entidade estruturalmente imutável e trigger SQL bloqueando `UPDATE`/`DELETE`. |
+| Sem lock global | Conforme | `SELECT ... FOR UPDATE` é aplicado somente à wallet disputada. |
+| Sem read-calculate-update livre | Conforme | Saldo é reidratado depois do lock pessimista e atualizado na mesma transação. |
+| Múltiplas instâncias | Conforme | Estado compartilhado no PostgreSQL; Outbox usa `SKIP LOCKED`; Inbox e idempotência são persistentes. |
+| Garantias no schema | Conforme | `CHECK`, `UNIQUE`, `FOREIGN KEY`, constraints aritméticas e trigger estão na migration SQL. |
 
-- **Idempotência Durável:** Uma transação é executada financeiramente no máximo uma única vez (exactly-once logical processing sobre transporte at-least-once).
-- **Imutabilidade Histórica:** O livro-razão contábil é puramente cumulativo (append-only).
+## 3. Invariantes financeiras
 
----
+- `wallet.balance >= 0` em código e no schema.
+- Uma wallet é única por `(player_id, currency)`.
+- O saldo materializado é reconciliável por:
 
-## 2. Architecture Decision Records (ADRs)
+  $$\text{wallet.balance} = \sum(\text{créditos}) - \sum(\text{débitos})$$
 
-### ADR 001: Controle de Concorrência via Pessimistic Write Locking (SELECT ... FOR UPDATE)
+- Cada operação que altera saldo produz exatamente um lançamento correspondente.
+- `REJECTED` e `LOSS` não criam lançamento financeiro.
+- O ledger é append-only.
+- Dinheiro entra e sai como string decimal com duas casas; internamente é `Decimal.js` e, na persistência, centavos inteiros.
 
-**Status:** Aprovado e Implementado
+## 4. Modelo de domínio
 
-**Contexto:**
+### Money
 
-Em sistemas de apostas, operações concorrentes disputando a mesma carteira (ex.: auto-bet em crash games) podem gerar condições de corrida (race conditions) e lost updates. O uso de Optimistic Locking (version + retry) provoca tempestades de exceções (StaleObjectStateException) e retrabalho de CPU/rede sob alta contenção. Travas globais em memória ou locks de tabela aniquilam a escalabilidade horizontal da plataforma.
+`Money` possui construtor privado e factories estáticas. Valida moeda, formato decimal, finitude, escala de até duas casas e não-negatividade. Operações retornam novas instâncias, preservando imutabilidade e evitando arredondamento binário de `number`.
 
-**Decisão:**
+### Wallet
 
-Adotou-se o bloqueio pessimista pontual via SELECT ... FOR UPDATE no PostgreSQL através do MikroORM (LockMode.PESSIMISTIC_WRITE), tendo como unidade estrita de concorrência a linha individual da carteira (wallet_id).
+`Wallet` é o Aggregate Root. `debit` e `credit` validam moeda, preservam saldo não-negativo e incrementam `version` somente quando ocorre mutação.
 
-**Consequências:**
+### WagerTransaction e WagerRuleEngine
 
-- **Positivas:** Serialização determinística no kernel do banco de dados; garantia absoluta contra saldo negativo; ausência de retries de aplicação; isolamento total (apostas de jogadores distintos ocorrem em paralelo sem qualquer contenção).
-- **Negativas / Mitigações:** Conexões de banco permanecem abertas durante a transação. Para mitigar saturação do pool, o escopo da transação é mantido estritamente curto, executando apenas validações essenciais em memória e inserts append-only antes do commit imediato.
+A transação nasce `PENDING`. Os estados `PROCESSED`, `REJECTED` e `FAILED` são terminais. `OPENING` é reservado à criação interna da wallet. O `WagerRuleEngine` avalia sem mutar estado:
 
-### ADR 002: Deduplicação e Integridade por Hash Canônico de Payload (SHA-256)
+| Kind | Efeito | Ledger | Regra |
+|---|---|---|---|
+| `BET` | Débito | `DEBIT` | Rejeita saldo insuficiente. |
+| `WIN` | Crédito | `CREDIT` | Crédito da rodada. |
+| `LOSS` | Nenhum | Nenhum | Apenas registra o resultado. |
+| `REFUND` | Crédito | `CREDIT` | Exige `BET` processada e referência válida. |
+| `ROLLBACK` | Inversão | Inverso | Exige referência processada e impede dupla reversão. |
 
-**Status:** Aprovado e Implementado
+Referências ausentes tornam a transação `PENDING_REFERENCE`; o worker reprocessa com política de TTL/backoff e atualiza a resposta persistida de idempotência quando o estado final é conhecido.
 
-**Contexto:**
+### WalletLedgerEntry
 
-Provedores de jogos reenviam requisições após timeouts de rede. A especificação exige diferenciar duas situações:
+A factory valida `balanceBefore ± amount = balanceAfter`, exige montante positivo e retorna uma entidade sem campos mutáveis. O schema repete essa proteção com `CHECK` e impede alterações históricas por trigger.
 
-- **Replay legítimo:** Mesma Idempotency-Key e mesmo payload → Retornar status e saldo originais sem reprocessar (idempotentReplay: true).
-- **Conflito de contrato:** Mesma Idempotency-Key reutilizada com payload divergente → Rejeição imediata com status 409 Conflict.
+## 5. ADRs
 
-Serializar JSON nativo via JSON.stringify não é determinístico devido à alternância arbitrária na ordem das chaves enviadas por diferentes clientes.
+### ADR-001 — Lock pessimista por wallet
 
-**Decisão:**
+**Decisão:** usar `LockMode.PESSIMISTIC_WRITE` na linha da wallet dentro da transação financeira.
 
-Implementou-se a classe utilitária CanonicalJsonHasher, que recursivamente ordena as propriedades alfanuméricas dos atributos de negócio antes de computar o hash SHA-256. O hash resultante é armazenado na tabela relacional idempotency_keys vinculada à constraint UNIQUE(provider_id, external_transaction_id).
+**Motivo:** duas apostas concorrentes sobre a mesma wallet são serializadas pelo PostgreSQL. A segunda lê o saldo já atualizado e é rejeitada sem retry de aplicação. Wallets distintas continuam em paralelo. Optimistic locking com retries foi rejeitado para evitar tempestades sob contenção.
 
-**Consequências:**
+**Trade-off:** uma hot wallet é limitada pela latência e capacidade de escrita do PostgreSQL. Esse limite é localizado por wallet, não global.
 
-- **Positivas:** Eliminação de falsos conflitos causados por permutação de chaves; garantia de idempotência persistente entre múltiplas réplicas da aplicação; prevenção de ataques de reutilização indevida de chaves de transação.
-- **Negativas / Mitigações:** Custo marginal de CPU para hashing SHA-256 em memória (inferior a 0.2ms por requisição).
+### ADR-002 — Dinheiro como Decimal.js e BIGINT
 
-### ADR 003: Prevenção de Dual-Write via Transactional Outbox com SKIP LOCKED
+A API recebe `{ amount: "25.00", currency: "BRL" }`. `Decimal.js` preserva precisão durante as operações; PostgreSQL armazena centavos em `BIGINT`. O domínio não depende de decorators ou tipos monetários do ORM.
 
-**Status:** Aprovado e Implementado
+### ADR-003 — Idempotência persistente e hash canônico
 
-**Contexto:**
+`CanonicalJsonHasher` ordena chaves recursivamente e calcula SHA-256 somente sobre campos de negócio. O header `Idempotency-Key` fica fora do hash.
 
-Publicar mensagens no broker (AWS SQS) e persistir o estado contábil no PostgreSQL em passos desconectados gera o problema clássico de Dual-Write. Se a mensagem for despachada e o commit do banco falhar, eventos fantasmas downstream serão consumidos. Se o banco comitar e o processo morrer antes de alcançar a rede, o evento é perdido.
+- Mesma chave e mesmo hash: replay da resposta persistida.
+- Mesma chave e hash diferente: `409 Conflict`.
+- O advisory lock é transacional e reduz a janela entre consultar e inserir a chave.
 
-**Decisão:**
+### ADR-004 — Transactional Outbox
 
-Adotou-se o padrão Transactional Outbox. O evento de domínio (outbox_events) é inserido na mesma transação atômica que debita a carteira e grava o ledger. Um worker em segundo plano realiza o despacho para o SQS FIFO utilizando a cláusula SQL:
+Wallet, transação, ledger, idempotência e eventos são persistidos no mesmo bloco transacional. O publisher faz `claim -> commit -> publish -> mark`, usando `FOR UPDATE SKIP LOCKED` para permitir múltiplas instâncias.
 
-```sql
-SELECT id FROM outbox_events
-WHERE published_at IS NULL AND next_attempt_at <= NOW()
-ORDER BY created_at ASC LIMIT 25
-FOR UPDATE SKIP LOCKED;
+A fila `wager-events.fifo` é separada da fila de ingestão `wager-transactions.fifo`; isso evita que eventos de saída sejam interpretados como novas apostas.
+
+Um crash depois do commit e antes do publish deixa o evento pendente na Outbox. Outra instância pode publicá-lo. Uma publicação repetida permanece segura por Inbox/idempotência downstream.
+
+### ADR-005 — Inbox e ACK
+
+O consumidor verifica `(consumerName, messageId)` em `inbox_messages`. O registro do Inbox e o efeito financeiro usam o mesmo contexto transacional do use case. O SQS só recebe ACK após commit.
+
+Erros de negócio são terminais e recebem ACK. Erros transitórios alteram a visibilidade para retry; a redrive policy do LocalStack limita a entrega e encaminha para DLQ.
+
+### ADR-006 — Autenticação
+
+A autenticação vale zero pontos na Seção 2. O default de avaliação é `NoopAuthGuard`, deixando health checks e testes locais independentes de um IdP. Existe `JwtAuthGuard` como extensão OIDC/JWKS RS256, mas ele não é ativado por padrão.
+
+O Zitadel no Compose é um ponto de extensão, não uma fonte automática das credenciais do avaliador. Um `client_id` precisa existir na mesma instância (`http://localhost:8080`); credenciais de outra instalação retornam `invalid_client`.
+
+## 6. Schema e garantias no banco
+
+A migration é [001_initial_schema.sql](src/infrastructure/database/migrations/001_initial_schema.sql) e cria:
+
+- `wallets` com `CHECK (balance >= 0)` e `UNIQUE (player_id, currency)`;
+- `wager_transactions` com FK para wallet e `UNIQUE (provider_id, external_transaction_id)`;
+- `idempotency_keys` com chave primária no header e unicidade do par provider/transação externa;
+- `ledger_entries` com montante positivo, saldo não-negativo, direção válida, aritmética e trigger append-only;
+- `outbox_events` e `inbox_messages` para entrega at-least-once e deduplicação persistente.
+
+## 7. Observabilidade e operação
+
+- `GET /health/live`: processo ativo.
+- `GET /health/ready`: PostgreSQL e SQS alcançáveis.
+- `GET /metrics`: contadores de status, duplicatas, retries, DLQ, conflitos de lock, lag da Outbox e latência.
+- Logs incluem contexto operacional sem registrar secrets ou payloads financeiros completos.
+
+O worker SQS trata envelopes inválidos como mensagens descartáveis e não deixa a exceção escapar do loop de polling. Mensagens antigas na fila podem produzir avisos de payload incompatível; a fila de ingestão deve conter apenas `WagerTransactionRequested`.
+
+## 8. Validação empírica
+
+A suíte atual passa com **34 testes, 0 falhas e 205 asserções**:
+
+```powershell
+bun run build
+bun test
 ```
 
-**Consequências:**
+Os cenários de maior risco são:
 
-- **Positivas:** Garantia inegociável de atomicidade; eliminação de deadlocks e contenção entre múltiplos workers publicadores concorrentes (cada instância pula as linhas bloqueadas por outras instâncias ativas); tolerância a indisponibilidade temporária do AWS SQS com backoff exponencial.
-- **Negativas / Mitigações:** Consistência eventual na entrega do evento aos consumidores downstream; latência de despacho limitada pelo intervalo de amostragem do poller (configurado em sub-segundos).
+1. saldo inicial `100.00` e duas apostas concorrentes de `80.00`: exatamente uma `PROCESSED`, uma `REJECTED`, saldo `20.00` e um débito;
+2. 50 requisições paralelas com a mesma chave: um débito e 49 replays;
+3. Outbox publicada com `SKIP LOCKED` e Inbox protegida contra redelivery;
+4. reconciliação do saldo materializado contra o ledger.
 
-### ADR 004: Estratégia de Autenticação Desacoplada (Porta de Domínio + No-Op Guard)
+## 9. Limitações e próximos riscos
 
-**Status:** Aprovado e Implementado
+- A autenticação JWT está preparada, mas o modo padrão é no-op por decisão de escopo.
+- A política de `PENDING_REFERENCE` usa TTL/backoff e pode ser refinada com colunas persistentes de tentativas.
+- `ledger_entries` deve ser particionada por tempo em volumes de produção muito altos.
+- O advisory lock usa `hashtext`, portanto uma colisão teórica de hash pode serializar chaves diferentes; não compromete a correção, apenas pode reduzir paralelismo em um caso extremo.
+- O teste de carga diferencial não faz parte dos scripts atuais; os números de desempenho não devem ser inventados.
 
-**Contexto:**
+## 10. Comandos do avaliador
 
-A seção de autenticação pontua zero na grade de avaliação do desafio e não concorre com os pilares de consistência contábil, concorrência e idempotência. Implementar autenticação artesanal (tabelas de usuário locais e hash de senha) viola as melhores práticas corporativas.
+```powershell
+bun install
+Copy-Item .env.example .env
+docker compose up -d
+Get-Content src/infrastructure/database/migrations/001_initial_schema.sql | docker exec -i wagering-postgres psql -U postgres -d wagering_db
+bun run build
+bun test
+bun run start
+```
 
-**Decisão:**
-
-Desacoplou-se a autenticação através da porta de domínio ProviderIdentityPort e de um NoopAuthGuard. Para execução local e testes rápidos de avaliação, o guard atua em modo pass-through injetando o contexto do provedor (RequestWithProvider). O Docker Compose provê o container do Zitadel configurado como ponto de extensão OIDC para ambientes produtivos.
-
-**Consequências:**
-
-- **Positivas:** 100% do foco da engenharia canalizado para a robustez do motor transacional e concorrência distribuída; aderência às restrições do desafio sem introduzir código inseguro ou desnecessário.
-- **Negativas / Mitigações:** As rotas HTTP em modo local não validam assinaturas criptográficas de tokens a menos que o guard seja configurado para validar o endpoint JWKS do Identity Provider.
-
----
-
-## 3. Matriz de Conformidade com as 9 Restrições Invioláveis
-
-| # | Restrição Inviolável | Erro Evitado | Abordagem Implementada no Projeto |
-|---:|---|---|---|
-| 1 | Não usar number, float ou double para dinheiro | Erros de arredondamento binário IEEE 754 e centavos perdidos | Manipulação em centavos inteiros via BigInt / Decimal.js e persistência em colunas BIGINT no PostgreSQL. |
-| 2 | Não usar cache em memória como garantia de idempotência | Duplicação de apostas em reinicializações ou multi-nós | Tabela relacional idempotency_keys com constraint UNIQUE(provider_id, external_transaction_id) no PostgreSQL. |
-| 3 | Não confiar apenas em SQS FIFO para consistência | Pagamentos duplicados após a janela de 5 min do SQS | Verificação transacional prévia no banco de dados antes de qualquer efeito colateral. |
-| 4 | Não publicar eventos antes do commit financeiro | Dual-write e processamento de eventos fantasmas | Gravação na tabela outbox_events no mesmo bloco BEGIN ... COMMIT do ledger. |
-| 5 | Não sobrescrever nem excluir lançamentos do ledger | Destruição da trilha de auditoria contábil e compliance | Tabela ledger_entries puramente append-only protegida por trigger que aborta UPDATE/DELETE. |
-| 6 | Não usar lock global compartilhado por todas as wallets | Colapso de throughput da plataforma inteira | Lock granular por linha (SELECT ... FOR UPDATE WHERE id = :walletId). |
-| 7 | Não implementar read-calculate-update livre | Lost updates e race conditions | Bloqueio pessimista de escrita na linha antes da leitura do saldo. |
-| 8 | Solução correta com múltiplas instâncias | Inconsistência de estado volátil entre réplicas | Aplicação 100% stateless; coordenação atômica delegada ao PostgreSQL. |
-| 9 | Garantias no schema do banco, não apenas no código | Bypasses por falhas de aplicação ou scripts manuais | CHECK (balance >= 0), validação contábil do ledger e constraints únicas no DDL. |
-
----
-
-## 4. Análise dos Testes de Concorrência e Validação Empírica
-
-### 4.1. Cenário de Disputa Simultânea de Saldo (Seção 8)
-
-**Condições Iniciais:** Carteira com saldo inicial de 100.00 BRL. Duas apostas simultâneas de 80.00 BRL disparadas no mesmo instante.
-
-**Comportamento Observado:**
-
-- A primeira transação a alcançar o banco adquiriu o lock pessimista na linha da carteira.
-- A segunda transação foi colocada em espera no driver de rede do PostgreSQL.
-- A primeira validou saldo suficiente, debitou R$ 80, inseriu 1 entrada de DEBIT no ledger e comitou com saldo residual de R$ 20.
-- A segunda foi liberada, leu o saldo atualizado (R$ 20), falhou na verificação de saldo e comitou com status terminal REJECTED (INSUFFICIENT_FUNDS) sem gerar débito.
-
-**Resultado:** Saldo final 20.00 BRL; exatamente 1 lançamento contábil de débito; auditoria matemática perfeitamente reconciliada.
-
-### 4.2. Cenário de Rajada Idempotente (50 Requisições Paralelas)
-
-**Condições:** 50 requisições simultâneas via Promise.all com a mesma chave e payload.
-
-**Comportamento Observado:**
-
-- A primeira requisição completou o débito e registrou o hash canônico na tabela idempotency_keys.
-- As 49 requisições concorrentes interceptadas devolveram a resposta armazenada com a flag idempotentReplay: true e saldo idêntico.
-
-**Contagem final no banco de dados:** Exatamente 1 transação de aposta e 1 débito no livro-razão.
-
----
-
-## 5. Limitações Conhecidas e Trade-offs Arquiteturais
-
-### Throughput de Carteira Individual (Hot Wallet)
-
-Ao escolher o Pessimistic Locking pontual na linha da carteira, o limite de transações por segundo para um único jogador fica delimitado pela latência de rede e escrita do PostgreSQL (~200 a 500 transações/segundo por carteira individual). Esse trade-off é amplamente aceito e desejável no mercado de iGaming, pois um apostador humano ou bot não opera acima dessa taxa, enquanto jogadores distintos escalam horizontalmente sem interferência mútua.
-
-### Particionamento de Tabelas de Alto Volume
-
-Em ambientes produtivos com centenas de milhões de apostas diárias, a tabela ledger_entries deve receber particionamento declarativo nativo no PostgreSQL (PARTITION BY RANGE (created_at) mensal ou semanal) para viabilizar retenção de dados e expurgo de arquivamento frio sem degradação de índices.
-
-### Multi-Moeda com Câmbio
-
-A implementação atual valida e exige isolamento estrito de moeda entre carteira e transações (CurrencyMismatchError). Para suporte futuro a apostas cross-currency, deve-se acoplar uma tabela de taxas de câmbio de precisão arbitrária preservando a auditoria da cotação no ledger.
+Depois, acessar http://localhost:3000/docs e executar os smoke tests descritos no [`README.md`](README.md).
