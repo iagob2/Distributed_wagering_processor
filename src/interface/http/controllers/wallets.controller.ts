@@ -10,6 +10,7 @@ import {
     ConflictException,
     NotFoundException,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { EntityManager } from '@mikro-orm/postgresql';
 import { CreateWalletDto } from '../dto/wallet.dto';
 import { WalletDbEntity } from '../../../infrastructure/database/entities/wallet.db-entity';

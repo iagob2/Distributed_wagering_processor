@@ -6,7 +6,7 @@ import {
     BadRequestException,
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
-import { Request } from 'express';
+import type { Request } from 'express';
 
 @Injectable()
 export class IdempotencyValidationInterceptor implements NestInterceptor {

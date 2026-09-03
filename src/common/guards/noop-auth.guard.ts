@@ -1,5 +1,5 @@
 import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common';
-import { Request } from 'express';
+import type { Request } from 'express';
 
 export interface RequestWithProvider extends Request {
     provider?: {

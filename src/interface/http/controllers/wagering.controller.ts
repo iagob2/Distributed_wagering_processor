@@ -11,7 +11,7 @@ import {
     HttpStatus,
     NotFoundException,
 } from '@nestjs/common';
-import { Response } from 'express';
+import type { Response } from 'express';
 import { EntityManager } from '@mikro-orm/postgresql';
 import { SubmitWagerDto } from '../dto/wager.dto';
 import { SubmitWagerTransactionService } from '../../../application/services/submit-wager-transaction.service';

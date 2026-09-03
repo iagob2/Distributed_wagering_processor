@@ -61,15 +61,11 @@ export class SqsWagerConsumerService implements OnModuleInit, OnModuleDestroy {
     }
 
     public async onModuleDestroy(): Promise<void> {
-        this.logger.log('Recebido comando de shutdown. Aguardando conclusão dos workers ativos...');
         this.isRunning = false;
-
-        // Graceful Shutdown: aguarda transações em andamento (limite de 10 segundos)
         const deadline = Date.now() + 10000;
         while (this.activeJobs > 0 && Date.now() < deadline) {
             await new Promise((resolve) => setTimeout(resolve, 300));
         }
-        this.logger.log('Consumidor SQS encerrado de forma limpa.');
     }
 
     private async poll(): Promise<void> {
@@ -79,7 +75,7 @@ export class SqsWagerConsumerService implements OnModuleInit, OnModuleDestroy {
                     new ReceiveMessageCommand({
                         QueueUrl: this.queueUrl,
                         MaxNumberOfMessages: 5,
-                        WaitTimeSeconds: 10, // Long Polling nativo do SQS
+                        WaitTimeSeconds: 10,
                         VisibilityTimeout: 30,
                     }),
                 );
@@ -90,7 +86,7 @@ export class SqsWagerConsumerService implements OnModuleInit, OnModuleDestroy {
             } catch (err: unknown) {
                 if (this.isRunning) {
                     const message = err instanceof Error ? err.message : String(err);
-                    this.logger.error(`Erro no loop de consumo SQS: ${message}`);
+                    this.logger.error(`Erro no loop SQS: ${message}`);
                     await new Promise((resolve) => setTimeout(resolve, 2000));
                 }
             }
@@ -102,29 +98,51 @@ export class SqsWagerConsumerService implements OnModuleInit, OnModuleDestroy {
         try {
             if (!message.Body || !message.ReceiptHandle) return;
 
-            const envelope: SqsMessageEnvelope = JSON.parse(message.Body);
+            let envelope: SqsMessageEnvelope;
+            try {
+                envelope = JSON.parse(message.Body);
+            } catch {
+                // Se for um JSON inválido ou evento sem o formato esperado, descarta (ACK)
+                this.logger.warn(`Mensagem malformada ${message.MessageId}. Descartando.`);
+                await this.sqsClient.send(
+                    new DeleteMessageCommand({
+                        QueueUrl: this.queueUrl,
+                        ReceiptHandle: message.ReceiptHandle,
+                    }),
+                );
+                return;
+            }
+
+            if (!envelope.data || !envelope.data.walletId) {
+                // Mensagem de evento outbox publicada por engano na fila de entrada de apostas -> ACK
+                this.logger.warn(`Mensagem sem dados de aposta ${message.MessageId}. Descartando.`);
+                await this.sqsClient.send(
+                    new DeleteMessageCommand({
+                        QueueUrl: this.queueUrl,
+                        ReceiptHandle: message.ReceiptHandle,
+                    }),
+                );
+                return;
+            }
+
             const payloadHash = CanonicalJsonHasher.hash(
                 envelope.data as unknown as Record<string, unknown>,
             );
 
             const forkEm = this.em.fork();
 
-            // Execução ACID: Checagem de Inbox + Débito/Crédito + Registro de Inbox
-            const result = await forkEm.transactional(async (txEm) => {
+            await forkEm.transactional(async (txEm) => {
                 const existingInbox = await txEm.findOne(InboxMessageDbEntity, {
                     messageId: envelope.messageId,
                     consumerName: this.consumerName,
                 });
 
                 if (existingInbox) {
-                    this.logger.warn(`Mensagem duplicada ${envelope.messageId} ignorada pelo Inbox.`);
-                    return { duplicate: true };
+                    return;
                 }
 
-                // Executa o mesmo Use Case chamado pela API HTTP
                 await this.submitService.execute(envelope.data.idempotencyKey, envelope.data);
 
-                // Registra o Inbox na mesma transação contábil
                 const inboxDb = txEm.create(InboxMessageDbEntity, {
                     messageId: envelope.messageId,
                     consumerName: this.consumerName,
@@ -134,28 +152,20 @@ export class SqsWagerConsumerService implements OnModuleInit, OnModuleDestroy {
                 });
 
                 txEm.persist(inboxDb);
-                return { duplicate: false };
             });
 
-            // Ack estrito pós-commit: remove da fila com garantia de entrega
             await this.sqsClient.send(
                 new DeleteMessageCommand({
                     QueueUrl: this.queueUrl,
                     ReceiptHandle: message.ReceiptHandle,
                 }),
             );
-
-            if (!result.duplicate) {
-                this.logger.log(`Mensagem SQS ${envelope.messageId} processada e confirmada (ACK).`);
-            }
         } catch (err: unknown) {
             const error = err as { code?: string; status?: number; message?: string };
+            this.logger.error(`Falha ao processar mensagem ${message.MessageId}: ${error.message}`);
 
-            // Erros terminais de negócio sofrem ACK imediato para não travar mensagens na fila FIFO
+            // Erros de negócio, carteira não encontrada (404) ou conflitos sofrem ACK para não travar a fila
             if (this.isTerminalBusinessError(error)) {
-                this.logger.warn(
-                    `Erro terminal de negócio na mensagem SQS ${message.MessageId}. Realizando ACK. Motivo: ${error.message}`,
-                );
                 await this.sqsClient.send(
                     new DeleteMessageCommand({
                         QueueUrl: this.queueUrl,
@@ -163,13 +173,11 @@ export class SqsWagerConsumerService implements OnModuleInit, OnModuleDestroy {
                     }),
                 );
             } else {
-                // Falhas transitórias (banco fora do ar, lock contention): devolve visibilidade para reprocessar
-                this.logger.error(`Falha transitória na mensagem ${message.MessageId}. Reprogramando visibilidade.`);
                 await this.sqsClient.send(
                     new ChangeMessageVisibilityCommand({
                         QueueUrl: this.queueUrl,
                         ReceiptHandle: message.ReceiptHandle!,
-                        VisibilityTimeout: 5,
+                        VisibilityTimeout: 10,
                     }),
                 );
             }
@@ -192,6 +200,7 @@ export class SqsWagerConsumerService implements OnModuleInit, OnModuleDestroy {
 
         return (
             (error.code !== undefined && terminalCodes.includes(error.code)) ||
+            error.status === 404 ||
             error.status === 409 ||
             error.status === 422
         );

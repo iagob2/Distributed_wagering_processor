@@ -41,14 +41,19 @@ services:
     image: ghcr.io/zitadel/zitadel:v2.53.0
     container_name: wagering-zitadel
     restart: unless-stopped
-    command: 'start-from-init --masterkey "MasterKeyNeedsToBe32BytesLong12" --tlsMode disabled'
+    command: 'start-from-init --masterkey "MasterKeyNeedsToBe32BytesLong123" --tlsMode disabled'
     environment:
       - ZITADEL_DATABASE_POSTGRES_HOST=postgres
       - ZITADEL_DATABASE_POSTGRES_PORT=5432
-      - ZITADEL_DATABASE_POSTGRES_DATABASE=wagering_db
-      - ZITADEL_DATABASE_POSTGRES_USER_USERNAME=postgres
-      - ZITADEL_DATABASE_POSTGRES_USER_PASSWORD=postgrespassword
+      - ZITADEL_DATABASE_POSTGRES_DATABASE=zitadel
+      - ZITADEL_DATABASE_POSTGRES_USER_USERNAME=zitadel
+      - ZITADEL_DATABASE_POSTGRES_USER_PASSWORD=zitadel
       - ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE=disable
+      - ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME=postgres
+      - ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD=postgrespassword
+      - ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE=disable
+      - ZITADEL_EXTERNALDOMAIN=localhost
+      - ZITADEL_EXTERNALPORT=8080
       - ZITADEL_EXTERNALSECURE=false
     ports:
       - "8080:8080"
