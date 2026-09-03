@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: wagering-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+      POSTGRES_DB: wagering_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres -d wagering_db" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  localstack:
+    image: localstack/localstack:3.4
+    container_name: wagering-localstack
+    restart: unless-stopped
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=sqs
+      - AWS_DEFAULT_REGION=us-east-1
+    volumes:
+      - ./infra/localstack/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh
+      - localstack_data:/var/lib/localstack
+    healthcheck:
+      test: [ "CMD", "awslocal", "sqs", "list-queues" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  zitadel:
+    image: ghcr.io/zitadel/zitadel:v2.53.0
+    container_name: wagering-zitadel
+    restart: unless-stopped
+    command: 'start-from-init --masterkey "MasterKeyNeedsToBe32BytesLong12" --tlsMode disabled'
+    environment:
+      - ZITADEL_DATABASE_POSTGRES_HOST=postgres
+      - ZITADEL_DATABASE_POSTGRES_PORT=5432
+      - ZITADEL_DATABASE_POSTGRES_DATABASE=wagering_db
+      - ZITADEL_DATABASE_POSTGRES_USER_USERNAME=postgres
+      - ZITADEL_DATABASE_POSTGRES_USER_PASSWORD=postgrespassword
+      - ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE=disable
+      - ZITADEL_EXTERNALSECURE=false
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  localstack_data:

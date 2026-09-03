@@ -1,0 +1,40 @@
+{
+    "name": "Distributed_wagering_processor",
+    "version": "1.0.0",
+    "description": "Distributed Wagering Processor with Transactional Outbox and Strict Ledger",
+    "private": true,
+    "scripts": {
+        "build": "nest build",
+        "format": "prettier --write \"src/**/*.ts\"",
+        "start": "bun run src/main.ts",
+        "start:dev": "nest start --watch",
+        "test": "bun test",
+        "test:watch": "bun test --watch",
+        "test:cov": "bun test --coverage"
+    },
+    "dependencies": {
+        "@aws-sdk/client-sqs": "^3.600.0",
+        "@mikro-orm/core": "^6.2.9",
+        "@mikro-orm/migrations": "^6.2.9",
+        "@mikro-orm/nestjs": "^6.0.2",
+        "@mikro-orm/postgresql": "^6.2.9",
+        "@nestjs/common": "^10.3.9",
+        "@nestjs/config": "^3.2.2",
+        "@nestjs/core": "^10.3.9",
+        "@nestjs/platform-express": "^10.3.9",
+        "@nestjs/terminus": "^10.2.3",
+        "bignumber.js": "^9.1.2",
+        "class-transformer": "^0.5.1",
+        "class-validator": "^0.14.1",
+        "prom-client": "^15.1.2",
+        "reflect-metadata": "^0.2.2",
+        "rxjs": "^7.8.1",
+        "uuid": "^10.0.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.14.9",
+        "@types/uuid": "^10.0.0",
+        "bun-types": "^1.1.18",
+        "typescript": "^5.5.2"
+    }
+}
