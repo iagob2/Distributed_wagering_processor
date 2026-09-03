@@ -75,6 +75,13 @@ export class SubmitWagerTransactionService {
         // 2. Transação ACID isolada com o EntityManager do MikroORM
         return await this.em.transactional(async (txEm) => {
             // 2.1 Validação de idempotência persistente
+            await txEm.getConnection().execute(
+                'SELECT pg_advisory_xact_lock(hashtext(?))',
+                [idempotencyKeyHeader],
+                'all',
+                txEm.getTransactionContext(),
+            );
+
             const existingIdempotency = await txEm.findOne(IdempotencyKeyDbEntity, {
                 key: idempotencyKeyHeader,
             });
