@@ -11,7 +11,8 @@ Serviço financeiro distribuído para iGaming, desenvolvido para o desafio técn
 - [Quickstart](#quickstart)
 - [Build e Testes](#build-e-testes)
 - [Teste de Carga](#teste-de-carga)
-- [Smoke Tests HTTP](#smoke-tests-http)
+- [Testes Interativos via Swagger UI (Recomendado)](#testes-interativos-via-swagger-ui-recomendado)
+- [Smoke Tests HTTP (Terminal)](#smoke-tests-http-terminal)
 - [Autenticação](#autenticação)
 - [Organização do Código](#organização-do-código)
 - [Decisões Arquiteturais](#decisões-arquiteturais)
@@ -34,8 +35,8 @@ Serviço financeiro distribuído para iGaming, desenvolvido para o desafio técn
 
 ## Pré-requisitos
 
-- Bun 1.x
-- Docker Desktop com Compose v2
+- Bun 1.x ([Instalação no Windows](https://bun.sh/docs/installation))
+- Docker Desktop com Compose v2 ([Download para Windows](https://www.docker.com/products/docker-desktop/))
 - Portas livres: `3000`, `5432`, `4566` e `8080`
 
 ---
@@ -60,7 +61,7 @@ cp .env.example .env
 
 ### 2. Subir a infraestrutura
 
-```bash
+```powershell
 docker compose up -d
 docker ps
 ```
@@ -98,7 +99,7 @@ A migration aplica:
 
 ### 4. Iniciar a API
 
-```bash
+```powershell
 bun run start
 ```
 
@@ -125,7 +126,7 @@ Endpoints locais:
 
 Compilação limpa sem gerar testes em `dist/`:
 
-```bash
+```powershell
 bun run build
 ```
 
@@ -137,7 +138,7 @@ bun run build
 
 Executa domínio, integração, interface e concorrência:
 
-```bash
+```powershell
 bun test
 ```
 
@@ -178,7 +179,7 @@ bun test
 
 O comando `bun run test:load` usa apenas Bun e a API local. Ele cria uma wallet isolada, executa requisições concorrentes e imprime JSON com throughput, p50, p95, p99, taxa de erro, status HTTP, conflitos de lock e lag da Outbox.
 
-```bash
+```powershell
 bun run test:load
 ```
 
@@ -198,26 +199,98 @@ LOAD_REQUESTS=100 LOAD_CONCURRENCY=20 bun run test:load
 
 ---
 
-## Smoke Tests HTTP
+## Testes Interativos via Swagger UI (Recomendado)
 
-Esta seção documenta o ciclo financeiro auditado com dados reais e orientações preventivas contra armadilhas comuns no terminal.
+⭐ **Esta é a forma mais visual e recomendada para testar a API** — ideal para explorar endpoints, validar contratos e entender o fluxo completo sem escrever uma linha de código.
+
+Toda a API foi anotada com DTOs autoexplicativos (`MoneyDto`, `CreateWalletDto`, `SubmitWagerDto`) e decoradores `@ApiProperty` para permitir execução direta na interface do navegador com payloads pré-preenchidos e validação instantânea.
+
+**Acesse diretamente:**
+👉 [http://localhost:3000/docs](http://localhost:3000/docs)
+
+### Roteiro de Teste Visual no Swagger
+
+#### Passo 1 — Inspecionar a Saúde Operacional e Métricas
+
+1. Acesse o grupo **Health & Ops** na página do Swagger.
+2. Localize e clique no endpoint: `GET /metrics` ou acesse diretamente pelo link rápido: [http://localhost:3000/docs#/Health%20%26%20Ops/HealthAndMetricsController_getMetrics](http://localhost:3000/docs#/Health%20%26%20Ops/HealthAndMetricsController_getMetrics)
+3. Clique em **Try it out** e depois em **Execute**.
+4. Visualize a saída com contadores como `db_lock_conflicts_total`, latências e status dos componentes.
+5. Execute também o endpoint `GET /health/ready` para certificar que o PostgreSQL e o LocalStack constam como `UP`.
+
+#### Passo 2 — Criar uma Carteira (Wallets)
+
+1. Expanda a tag **Wallets** e selecione `POST /wallets`.
+2. Clique em **Try it out**. O schema preenche o body padrão:
+
+```json
+{
+  "playerId": "player-smoke-001",
+  "initialBalance": {
+    "amount": "100.00",
+    "currency": "BRL"
+  }
+}
+```
+
+3. Clique em **Execute**. A resposta retornará o `id` da carteira (copie este UUID para os próximos passos).
+
+#### Passo 3 — Processar Transações de Aposta (Wagering)
+
+1. Expanda a tag **Wagering** e abra `POST /wagering/transactions`.
+2. Clique no botão **Authorize** no topo direito da página (caso a autenticação esteja ativada):
+   - **Idempotency-Key**: Informe um identificador (ex: `provider-smoke:tx-001`).
+   - **bearer-token**: Cole o JWT obtido no Zitadel (veja a seção [Autenticação](#autenticação)).
+3. Preencha o corpo da requisição com o `walletId` obtido no Passo 2:
+
+```json
+{
+  "providerId": "provider-smoke",
+  "externalTransactionId": "tx-001",
+  "playerId": "player-smoke-001",
+  "walletId": "SEU_WALLET_ID_AQUI",
+  "roundId": "round-001",
+  "gameId": "fortune-chimp",
+  "kind": "BET",
+  "money": {
+    "amount": "30.00",
+    "currency": "BRL"
+  }
+}
+```
+
+4. Clique em **Execute**. A resposta `200 OK` exibirá o status `PROCESSED`, saldo `70.00` e `idempotentReplay: false`.
+5. Se enviar novamente com o mesmo `Idempotency-Key` e a mesma transação, o sistema retornará a resposta original com `idempotentReplay: true`.
+
+#### Passo 4 — Extrato Auditado e Reconciliação
+
+- Em **Wallets**, execute `GET /wallets/{id}/ledger` para visualizar o extrato imutável de créditos e débitos.
+- Execute `POST /wallets/{id}/reconciliation` para verificar a consistência matemática exata entre a soma cumulativa dos centavos no ledger e o saldo final da carteira.
 
 ---
+
+## Smoke Tests HTTP (Terminal)
+
+Esta seção documenta o ciclo financeiro auditado com dados reais e orientações preventivas contra armadilhas comuns no terminal. **Recomendado para automação e CI/CD.**
 
 ### Cuidados com a sintaxe no PowerShell
 
 1. **Variável reservada `$PID`:** No PowerShell, `$PID` armazena o Process ID da sessão e é somente leitura. Usar `$pId` dispara erro de permissão (`VariableNotWritable`). Sempre utilize variáveis nomeadas como `$testPlayerId`.
 
 2. **Concatenação acidental de parâmetros:** Nunca cole uma variável receptora colada no corpo da requisição. Exemplo incorreto:
+
 ```powershell
    # ERRADO — gera string malformada
    -Body $betBody$betResponse | Format-List
 ```
-   Isso resulta em:
+
+Isso resulta em:
+
 ```json
    {"message":"JSON Parse error: Unable to parse JSON string","error":"Bad Request","statusCode":400}
 ```
-   Sempre atribua a chamada e formate o output em linhas separadas.
+
+Sempre atribua a chamada e formate o output em linhas separadas.
 
 ---
 
@@ -503,44 +576,60 @@ Para extensibilidade, o projeto inclui `JwtAuthGuard` baseado em JWKS RS256 e um
 
 ---
 
-### Observabilidade
-
-Os logs do bootstrap e dos workers são emitidos como JSON estruturado com os campos:
-
-- `correlationId`
-- `messageId`
-- `transactionId`
-- `walletId`
-- `providerId`
-
-A métrica `db_lock_conflicts_total` é incrementada para:
-
-| Código PostgreSQL | Situação                    |
-|-------------------|-----------------------------|
-| `40P01`           | Deadlock                    |
-| `55P03`           | Lock timeout (NOWAIT)       |
-| —                 | Mensagens de timeout/deadlock reconhecidas via SQS |
-
----
-
 ## Organização do Código
 
 ```
 src/
-├── domain/           # Regras puras: Money, Wallet, Ledger, WagerRuleEngine
-├── application/      # Casos de uso e background workers
-├── infrastructure/   # Entidades MikroORM, migrations, SQS e Outbox
-└── interface/http/   # Controllers REST, DTOs e interceptores
-
-tests/
-├── domain/           # Testes unitários de domínio
-├── integration/      # PostgreSQL + LocalStack (SQS, DLQ, crash recovery)
-└── concurrency/      # Workers independentes e processos OS reais
+├── application/              # Casos de uso e orquestração
+│   ├── services/             # Serviços de aplicação
+│   └── workers/              # Workers de background (SQS, Outbox)
+├── common/                   # Cross-cutting concerns
+│   ├── guards/               # Guards de autenticação
+│   ├── interceptors/         # Interceptores HTTP
+│   ├── logging/              # Logging estruturado
+│   ├── metrics/              # Métricas Prometheus
+│   └── utils/                # Utilitários gerais
+├── domain/                   # Regras de negócio puras (DDD)
+│   ├── entities/             # Entidades de domínio
+│   ├── errors/               # Erros de domínio
+│   ├── events/               # Eventos de domínio
+│   ├── ports/                # Portas (interfaces) para infraestrutura
+│   ├── value-objects/        # Value Objects (Money, etc.)
+│   └── wager/                # Regras específicas de aposta
+├── infrastructure/           # Implementações concretas
+│   ├── database/             # MikroORM, migrations
+│   ├── entities/             # Entidades ORM
+│   ├── migrations/           # Migrations SQL
+│   └── messaging/            # SQS, Outbox, DLQ
+├── interface/                # Interfaces com o mundo externo
+│   └── http/                 # Camada HTTP
+│       ├── controllers/      # Controllers REST
+│       └── dto/              # Data Transfer Objects
+└── tests/                    # Suíte de testes
+    ├── common/               # Testes de utilitários comuns
+    ├── concurrency/          # Testes de concorrência
+    │   ├── balance-contention.spec.ts
+    │   ├── idempotency-burst.spec.ts
+    │   ├── multi-instance-concurrency.spec.ts
+    │   └── multi-process-os.spec.ts
+    ├── domain/               # Testes de domínio
+    │   ├── domain-integration.spec.ts
+    │   ├── money.vo.spec.ts
+    │   ├── wager-rule-engine.spec.ts
+    │   ├── wager-transaction.spec.ts
+    │   ├── wallet-ledger-entries.spec.ts
+    │   └── wallet.entity.spec.ts
+    ├── helpers/              # Helpers e utilities de teste
+    │   └── test-setup.ts
+    └── integration/          # Testes de integração
+        ├── crash-recovery-ack.spec.ts
+        ├── lock-conflict-55p03.spec.ts
+        └── sqs-dlq.integration.spec.ts
 ```
 
 ---
 
-### Visão geral dos pilares
+## Decisões Arquiteturais
 
 | Pilar                        | Abordagem resumida                                                                 |
 |------------------------------|------------------------------------------------------------------------------------|
@@ -552,4 +641,4 @@ tests/
 | **Inbox deduplication**      | Consumer verifica `message_id` antes de executar; mensagens poison vão para a DLQ  |
 | **Crash recovery**           | Lock pessimista + redelivery SQS garantem retomada segura após falha sem ACK       |
 
-> Para a análise completa de cada decisão, consulte [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+> Para a análise aprofundada de trade-offs, diagramas de topologia e ADRs detalhadas, consulte [`ARCHITECTURE.md`](./ARCHITECTURE.md).
