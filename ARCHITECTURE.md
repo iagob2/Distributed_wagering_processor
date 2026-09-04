@@ -200,7 +200,8 @@ A migration está em `src/infrastructure/database/migrations/001_initial_schema.
 - **Liveness:** `GET /health/live` verifica apenas se o processo está vivo, sem depender de rede.
 - **Readiness:** `GET /health/ready` executa `SELECT 1` no PostgreSQL e consulta a fila SQS. Em falha, retorna `503 Service Unavailable`.
 - **Métricas:** `GET /metrics` expõe métricas Prometheus, incluindo latência, transações por status, duplicatas, retries, DLQ, conflitos de lock e lag da Outbox.
-- **Logs:** os workers registram contexto operacional sem expor secrets ou payloads financeiros completos.
+- **Logs:** bootstrap e workers emitem JSON com `correlationId`, `messageId`, `transactionId`, `walletId` e `providerId`; secrets e payloads financeiros completos não são registrados.
+- **Conflitos de lock:** deadlocks (`40P01`), lock timeout (`55P03`) e mensagens reconhecidas de timeout/deadlock incrementam `db_lock_conflicts_total` antes de o erro ser propagado.
 
 ---
 
@@ -213,7 +214,7 @@ bun run build
 bun test
 ```
 
-Resultado validado: **34 testes automatizados, 0 falhas e 205 asserções**.
+Resultado validado: **37 testes automatizados, 0 falhas**, incluindo os cenários multi-instância, crash recovery e DLQ.
 
 ### Cenários críticos
 
@@ -221,6 +222,8 @@ Resultado validado: **34 testes automatizados, 0 falhas e 205 asserções**.
 2. **Rajada idempotente:** 50 chamadas paralelas com a mesma `Idempotency-Key`. O sistema realiza um débito e retorna 49 replays com o mesmo snapshot.
 3. **Operação fora de ordem:** um `ROLLBACK` sem referência fica em `PENDING_REFERENCE` e pode ser resolvido pelo worker após a chegada do evento referenciado.
 4. **Reconciliação contínua:** o endpoint confirma `difference = 0.00` quando o saldo e o ledger estão consistentes.
+5. **Três workers e crash recovery:** forks de EntityManager independentes disputam a mesma wallet; uma redelivery após commit sem ACK retorna replay e mantém um único débito.
+6. **Poison message:** mensagem inválida é encaminhada para uma DLQ FIFO temporária e incrementa `dlq_messages_total`.
 
 ---
 
@@ -230,7 +233,7 @@ Resultado validado: **34 testes automatizados, 0 falhas e 205 asserções**.
 - **Autenticação no ambiente padrão:** o `NoopAuthGuard` permanece ativo para execução sem atrito; o `JwtAuthGuard` está disponível como extensão.
 - **Advisory lock:** `hashtext(idempotency_key)` pode teoricamente colidir entre chaves distintas. Uma colisão causaria apenas espera adicional, nunca corrupção financeira.
 - **Volume histórico:** em produção com bilhões de registros, `ledger_entries` deve ser particionada por data com `PARTITION BY RANGE (created_at)`.
-- **Teste de carga:** não há números de throughput ou percentis publicados sem uma execução formal e reproduzível do teste de carga.
+- **Teste de carga:** `bun run test:load` é nativo do Bun e imprime throughput, p50, p95, p99, taxa de erro, conflitos de lock e lag da Outbox. O relatório depende do ambiente executado e não é benchmark de produção.
 
 ---
 
@@ -250,6 +253,13 @@ Get-Content src/infrastructure/database/migrations/001_initial_schema.sql | dock
 # 4. Executar build e testes
 bun run build
 bun test
+bun test tests/concurrency/multi-instance-concurrency.spec.ts
+bun test tests/integration/sqs-dlq.integration.spec.ts
+
+# Carga curta reproduzível
+$env:LOAD_REQUESTS = "100"
+$env:LOAD_CONCURRENCY = "20"
+bun run test:load
 
 # 5. Iniciar a API com Swagger e métricas
 bun run start

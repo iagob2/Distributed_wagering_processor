@@ -105,6 +105,15 @@ bun test tests/integration
 
 # Concorrência real com banco e pool de conexões
 bun test tests/concurrency
+
+# Três workers independentes e crash recovery após commit sem ACK
+bun test tests/concurrency/multi-instance-concurrency.spec.ts
+
+# Poison message encaminhada para DLQ real no LocalStack
+bun test tests/integration/sqs-dlq.integration.spec.ts
+
+# Carga nativa Bun (ajuste LOAD_REQUESTS/LOAD_CONCURRENCY se necessário)
+bun run test:load
 ```
 
 A suíte cobre:
@@ -112,10 +121,24 @@ A suíte cobre:
 - Value Object `Money`, Aggregate Root `Wallet`, máquina de estados e regras `BET/WIN/LOSS/REFUND/ROLLBACK`;
 - disputa concorrente de duas apostas de `80.00` sobre saldo inicial de `100.00`;
 - rajada concorrente de 50 requisições com a mesma `Idempotency-Key`;
+- três workers independentes disputando a mesma carteira e redelivery após crash;
 - padrões Transactional Outbox, AWS SQS e Inbox Deduplication;
+- encaminhamento de mensagens poison para a DLQ;
 - reconciliação matemática entre o saldo materializado da carteira e os lançamentos do ledger.
 
 O script `bun run build` usa `tsc` diretamente e exclui `tests/`, evitando que o Bun execute cópias compiladas dos testes.
+
+### Teste de carga
+
+O comando `bun run test:load` usa apenas Bun e a API local. Ele cria uma wallet isolada, executa requisições concorrentes e imprime JSON com throughput, p50, p95, p99, taxa de erro, status HTTP, conflitos de lock e lag da Outbox.
+
+```powershell
+$env:LOAD_REQUESTS = "100"
+$env:LOAD_CONCURRENCY = "20"
+bun run test:load
+```
+
+O relatório é uma fotografia do ambiente executado; não representa benchmark de produção.
 
 ## Smoke tests HTTP
 
@@ -251,6 +274,8 @@ O resultado esperado é HTTP `422`, status `REJECTED` e saldo preservado em `70.
 A Seção 2 do desafio técnico não pontua autenticação. O comportamento padrão usa `NoopAuthGuard`, permitindo testes locais e uso do Swagger sem token prévio.
 
 Para extensibilidade, o projeto inclui `JwtAuthGuard` baseado em JWKS RS256 e uma instância Zitadel no Compose. Para usar autenticação real, ative o guard nos controllers, configure `IDP_ISSUER` e `IDP_JWKS_URI` e gere credenciais na mesma instância Zitadel. Credenciais de outra instalação retornam `invalid_client`.
+
+Os logs do bootstrap e dos workers são emitidos como JSON com `correlationId`, `messageId`, `transactionId`, `walletId` e `providerId`. A métrica `db_lock_conflicts_total` é incrementada para deadlocks (`40P01`), lock timeout (`55P03`) e mensagens de timeout/deadlock reconhecidas.
 
 ## Organização do código
 
