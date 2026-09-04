@@ -2,41 +2,61 @@
 
 Serviço financeiro distribuído para iGaming, desenvolvido para o desafio técnico da Jungle Gaming. A implementação prioriza correção monetária, concorrência por carteira, idempotência persistente, ledger auditável e mensageria resiliente.
 
+---
+
+## Sumário
+
+- [Stack](#stack)
+- [Pré-requisitos](#pré-requisitos)
+- [Quickstart](#quickstart)
+- [Build e Testes](#build-e-testes)
+- [Teste de Carga](#teste-de-carga)
+- [Smoke Tests HTTP](#smoke-tests-http)
+- [Autenticação](#autenticação)
+- [Organização do Código](#organização-do-código)
+- [Decisões Arquiteturais](#decisões-arquiteturais)
+
+---
+
 ## Stack
 
-| Camada | Tecnologia |
-|---|---|
-| Runtime, package manager e testes | Bun 1.x |
-| Linguagem | TypeScript strict |
-| Framework | NestJS 10 |
-| ORM | MikroORM 6 |
-| Banco | PostgreSQL 16 |
-| Mensageria | AWS SQS via LocalStack |
-| Identidade | Zitadel como extensão OIDC opcional |
+| Camada                             | Tecnologia                    |
+|------------------------------------|-------------------------------|
+| Runtime, package manager e testes  | Bun 1.x                       |
+| Linguagem                          | TypeScript strict              |
+| Framework                          | NestJS 10                     |
+| ORM                                | MikroORM 6                    |
+| Banco                              | PostgreSQL 16                 |
+| Mensageria                         | AWS SQS via LocalStack        |
+| Identidade                         | Zitadel (extensão OIDC opcional) |
+
+---
 
 ## Pré-requisitos
 
 - Bun 1.x
 - Docker Desktop com Compose v2
-- Portas livres `3000`, `5432`, `4566` e `8080`
+- Portas livres: `3000`, `5432`, `4566` e `8080`
+
+---
 
 ## Quickstart
 
 ### 1. Instalar dependências
 
-Windows PowerShell:
-
+**Windows PowerShell:**
 ```powershell
 bun install
 Copy-Item .env.example .env
 ```
 
-Linux/macOS:
-
+**Linux/macOS:**
 ```bash
 bun install
 cp .env.example .env
 ```
+
+---
 
 ### 2. Subir a infraestrutura
 
@@ -45,25 +65,36 @@ docker compose up -d
 docker ps
 ```
 
-Aguarde `wagering-postgres` e `wagering-localstack` ficarem com status `healthy`. O `wagering-zitadel` é um ponto de extensão opcional para autenticação OIDC.
+Aguarde os containers `wagering-postgres` e `wagering-localstack` ficarem com status `healthy`.
+
+> O container `wagering-zitadel` é um ponto de extensão opcional para autenticação OIDC.
+
+---
 
 ### 3. Aplicar a migration
 
-Execute uma vez, assim que o PostgreSQL estiver saudável.
+Execute **uma vez**, assim que o PostgreSQL estiver saudável.
 
-Windows PowerShell:
-
+**Windows PowerShell:**
 ```powershell
 Get-Content src/infrastructure/database/migrations/001_initial_schema.sql | docker exec -i wagering-postgres psql -U postgres -d wagering_db
 ```
 
-Linux/macOS:
-
+**Linux/macOS:**
 ```bash
 docker exec -i wagering-postgres psql -U postgres -d wagering_db < src/infrastructure/database/migrations/001_initial_schema.sql
 ```
 
-A migration aplica `BIGINT` para centavos, `CHECK (balance >= 0)`, unicidade de carteira por `(player_id, currency)`, unicidade de transação por `(provider_id, external_transaction_id)`, constraints aritméticas do ledger e trigger contra `UPDATE`/`DELETE` no ledger.
+A migration aplica:
+
+- `BIGINT` para centavos
+- `CHECK (balance >= 0)`
+- Unicidade de carteira por `(player_id, currency)`
+- Unicidade de transação por `(provider_id, external_transaction_id)`
+- Constraints aritméticas do ledger
+- Trigger contra `UPDATE`/`DELETE` no ledger
+
+---
 
 ### 4. Iniciar a API
 
@@ -73,218 +104,468 @@ bun run start
 
 Endpoints locais:
 
-- Swagger UI: http://localhost:3000/docs
-- Liveness: http://localhost:3000/health/live
-- Readiness: http://localhost:3000/health/ready
-- Métricas: http://localhost:3000/metrics
+| Recurso        | URL                                      |
+|----------------|------------------------------------------|
+| Swagger UI     | http://localhost:3000/docs               |
+| Liveness       | http://localhost:3000/health/live        |
+| Readiness      | http://localhost:3000/health/ready       |
+| Métricas       | http://localhost:3000/metrics            |
 
-Se aparecer o erro `EADDRINUSE`, encerre instâncias anteriores do Bun ou libere a porta `3000` antes de executar novamente:
+> **Porta em uso?** Se aparecer `EADDRINUSE`, encerre instâncias anteriores do Bun ou libere a porta 3000:
+> ```powershell
+> Get-NetTCPConnection -LocalPort 3000 -State Listen
+> Stop-Process -Id <PID> -Force
+> ```
 
-```powershell
-Get-NetTCPConnection -LocalPort 3000 -State Listen
-Stop-Process -Id <PID> -Force
-```
+---
 
-## Build e testes
+## Build e Testes
+
+### Compilação
+
+Compilação limpa sem gerar testes em `dist/`:
 
 ```bash
-# Compilação limpa sem gerar testes em dist/
 bun run build
-
-# Suíte completa: domínio, integração, interface e concorrência
-bun test
-
-# Domínio e regras financeiras
-bun test tests/domain
-
-# Hash canônico
-bun test tests/common
-
-# PostgreSQL + LocalStack
-bun test tests/integration
-
-# Concorrência real com banco e pool de conexões
-bun test tests/concurrency
-
-# Três workers independentes e crash recovery após commit sem ACK
-bun test tests/concurrency/multi-instance-concurrency.spec.ts
-
-# Poison message encaminhada para DLQ real no LocalStack
-bun test tests/integration/sqs-dlq.integration.spec.ts
-
-# Carga nativa Bun (ajuste LOAD_REQUESTS/LOAD_CONCURRENCY se necessário)
-bun run test:load
 ```
 
-A suíte cobre:
+> O script usa `tsc` diretamente e exclui `tests/`, evitando que o Bun execute cópias compiladas dos testes.
 
-- Value Object `Money`, Aggregate Root `Wallet`, máquina de estados e regras `BET/WIN/LOSS/REFUND/ROLLBACK`;
-- disputa concorrente de duas apostas de `80.00` sobre saldo inicial de `100.00`;
-- rajada concorrente de 50 requisições com a mesma `Idempotency-Key`;
-- três workers independentes disputando a mesma carteira e redelivery após crash;
-- padrões Transactional Outbox, AWS SQS e Inbox Deduplication;
-- encaminhamento de mensagens poison para a DLQ;
-- reconciliação matemática entre o saldo materializado da carteira e os lançamentos do ledger.
+---
 
-O script `bun run build` usa `tsc` diretamente e exclui `tests/`, evitando que o Bun execute cópias compiladas dos testes.
+### Suíte completa
 
-### Teste de carga
+Executa domínio, integração, interface e concorrência:
+
+```bash
+bun test
+```
+
+---
+
+### Suítes individuais
+
+| Escopo                                                | Comando                                                                      |
+|-------------------------------------------------------|------------------------------------------------------------------------------|
+| Domínio e regras financeiras                          | `bun test tests/domain`                                                      |
+| Hash canônico                                         | `bun test tests/common`                                                      |
+| PostgreSQL + LocalStack                               | `bun test tests/integration`                                                 |
+| Concorrência real com banco e pool de conexões        | `bun test tests/concurrency`                                                 |
+| Três workers independentes e crash recovery após commit sem ACK | `bun test tests/concurrency/multi-instance-concurrency.spec.ts`  |
+| Três processos Bun reais, cada um com seu próprio ORM e pool | `bun test tests/concurrency/multi-process-os.spec.ts`             |
+| Crash recovery usando o consumer oficial e redelivery do SQS | `bun test tests/integration/crash-recovery-ack.spec.ts`            |
+| Conflito de lock nativo do PostgreSQL (55P03/NOWAIT)  | `bun test tests/integration/lock-conflict-55p03.spec.ts`                     |
+| Poison message encaminhada para DLQ real no LocalStack | `bun test tests/integration/sqs-dlq.integration.spec.ts`                   |
+
+---
+
+### Cobertura da suíte
+
+- Value Object `Money`, Aggregate Root `Wallet`, máquina de estados e regras `BET/WIN/LOSS/REFUND/ROLLBACK`
+- Disputa concorrente de duas apostas de `80.00` sobre saldo inicial de `100.00`
+- Rajada concorrente de 50 requisições com a mesma `Idempotency-Key`
+- Três workers independentes disputando a mesma carteira e redelivery após crash
+- Três processos OS reais disputando a mesma carteira
+- Crash recovery com o consumer oficial após commit sem ACK
+- Padrões Transactional Outbox, AWS SQS e Inbox Deduplication
+- Encaminhamento de mensagens poison para a DLQ
+- Conflito real `55P03` usando `FOR UPDATE NOWAIT`
+- Reconciliação matemática entre o saldo materializado da carteira e os lançamentos do ledger
+
+---
+
+## Teste de Carga
 
 O comando `bun run test:load` usa apenas Bun e a API local. Ele cria uma wallet isolada, executa requisições concorrentes e imprime JSON com throughput, p50, p95, p99, taxa de erro, status HTTP, conflitos de lock e lag da Outbox.
 
+```bash
+bun run test:load
+```
+
+Para ajustar a carga:
+
+**Windows PowerShell:**
 ```powershell
 $env:LOAD_REQUESTS = "100"
 $env:LOAD_CONCURRENCY = "20"
 bun run test:load
 ```
 
-O relatório é uma fotografia do ambiente executado; não representa benchmark de produção.
-
-## Smoke tests HTTP
-
-### Health
-
+**Linux/macOS:**
 ```bash
-curl -s http://localhost:3000/health/live
-curl -s http://localhost:3000/health/ready
+LOAD_REQUESTS=100 LOAD_CONCURRENCY=20 bun run test:load
 ```
 
-### Criar carteira
+---
 
-Use um `playerId` novo para cada execução, pois existe uma wallet por jogador e moeda.
+## Smoke Tests HTTP
 
-```bash
-curl -s -X POST http://localhost:3000/wallets \
-  -H "Content-Type: application/json" \
-  -d '{
-    "playerId": "jogador-smoke-001",
-    "initialBalance": { "amount": "100.00", "currency": "BRL" }
-  }'
+Esta seção documenta o ciclo financeiro auditado com dados reais e orientações preventivas contra armadilhas comuns no terminal.
+
+---
+
+### Cuidados com a sintaxe no PowerShell
+
+1. **Variável reservada `$PID`:** No PowerShell, `$PID` armazena o Process ID da sessão e é somente leitura. Usar `$pId` dispara erro de permissão (`VariableNotWritable`). Sempre utilize variáveis nomeadas como `$testPlayerId`.
+
+2. **Concatenação acidental de parâmetros:** Nunca cole uma variável receptora colada no corpo da requisição. Exemplo incorreto:
+```powershell
+   # ERRADO — gera string malformada
+   -Body $betBody$betResponse | Format-List
 ```
-
-Copie o campo `id` retornado e substitua `WALLET_ID` nos comandos seguintes.
-
-### Submeter uma aposta
-
-```bash
-curl -s -X POST http://localhost:3000/wagering/transactions \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: provider-smoke:tx-001" \
-  -d '{
-    "providerId": "provider-smoke",
-    "externalTransactionId": "tx-001",
-    "playerId": "jogador-smoke-001",
-    "walletId": "WALLET_ID",
-    "roundId": "round-smoke-001",
-    "gameId": "fortune-chimp",
-    "kind": "BET",
-    "money": { "amount": "30.00", "currency": "BRL" }
-  }'
+   Isso resulta em:
+```json
+   {"message":"JSON Parse error: Unable to parse JSON string","error":"Bad Request","statusCode":400}
 ```
+   Sempre atribua a chamada e formate o output em linhas separadas.
 
-A resposta esperada é `200`, com status `PROCESSED`, saldo `70.00` e `idempotentReplay: false`. Repetir a mesma chamada deve retornar a resposta original com `idempotentReplay: true`.
+---
 
-### Criar carteira e apostar no Windows PowerShell
+### Semântica do Livro-Razão (Ledger)
+
+A contabilidade formal da carteira do jogador segue regras estritas:
+
+| Direção  | Significado                                                                 |
+|----------|-----------------------------------------------------------------------------|
+| `CREDIT` | Toda **entrada** de valor que aumenta o saldo (depósito inicial, WIN, REFUND) |
+| `DEBIT`  | Toda **saída** de valor que reduz o saldo (aposta BET, saques)              |
+
+---
+
+### Execução no Windows PowerShell
+
+Execute os passos sequencialmente com a API ativa.
+
+#### Passo 1 — Verificar saúde da aplicação
 
 ```powershell
-$playerId = "player-smoke-" + (Get-Date -Format "yyyyMMddHHmmss")
+Invoke-RestMethod -Uri "http://localhost:3000/health/ready"
+```
+
+Saída esperada:
+
+```
+status checks
+------ ------
+UP     @{database=UP; messaging=UP}
+```
+
+---
+
+#### Passo 2 — Criar carteira com saldo inicial de R$ 100.000,00
+
+```powershell
+$testPlayerId = "player-smoke-" + (Get-Date -Format "yyyyMMddHHmmss")
 $createBody = @{
-    playerId = $playerId
+    playerId = $testPlayerId
     initialBalance = @{
-        amount = "100.00"
+        amount = "100000.00"
         currency = "BRL"
     }
 } | ConvertTo-Json
 
-$wallet = Invoke-RestMethod `
-    -Uri "http://localhost:3000/wallets" `
-    -Method Post `
-    -ContentType "application/json" `
-    -Body $createBody
-
-$walletId = $wallet.id
-$txId = "tx-" + (Get-Date -Format "yyyyMMddHHmmss")
-$betBody = @{
-    providerId = "provider-smoke"
-    externalTransactionId = $txId
-    playerId = $playerId
-    walletId = $walletId
-    roundId = "round-smoke-001"
-    gameId = "fortune-chimp"
-    kind = "BET"
-    money = @{
-        amount = "30.00"
-        currency = "BRL"
-    }
-} | ConvertTo-Json
-$headers = @{ "Idempotency-Key" = "provider-smoke:$txId" }
-
-Invoke-RestMethod `
-    -Uri "http://localhost:3000/wagering/transactions" `
-    -Method Post `
-    -Headers $headers `
-    -ContentType "application/json" `
-    -Body $betBody | Format-List
+$wallet = Invoke-RestMethod -Uri "http://localhost:3000/wallets" -Method Post -ContentType "application/json" -Body $createBody
+$testWalletId = $wallet.id
+Write-Host "Carteira criada com sucesso!" -ForegroundColor Green
+Write-Host "Wallet ID: $testWalletId"
+$wallet | Format-List
 ```
 
-### Reconciliação e ledger
+Saída esperada:
 
-```bash
-curl -s "http://localhost:3000/wallets/WALLET_ID/ledger?limit=50"
-curl -s -X POST http://localhost:3000/wallets/WALLET_ID/reconciliation
+```
+id       : e9da796b-4bcb-4326-bc5d-8a4cb6601304
+playerId : player-smoke-20260904124445
+balance  : @{amount=100000.00; currency=BRL}
+version  : 1
 ```
 
-A reconciliação deve retornar `consistent: true`, saldo armazenado `70.00`, saldo calculado `70.00` e dois lançamentos: abertura `CREDIT` e aposta `DEBIT`. A aposta rejeitada por saldo insuficiente não gera lançamento.
+---
 
-### Testar saldo insuficiente no PowerShell
+#### Passo 3 — Débito 1: Aposta de R$ 300,00 (BET)
 
 ```powershell
-$excessId = "tx-excess-" + (Get-Date -Format "yyyyMMddHHmmss")
-$excessBody = @{
-    providerId = "provider-smoke"
-    externalTransactionId = $excessId
-    playerId = $playerId
-    walletId = $walletId
-    roundId = "round-smoke-002"
-    gameId = "fortune-chimp"
-    kind = "BET"
-    money = @{
-        amount = "80.00"
-        currency = "BRL"
-    }
+$txId1 = "tx-300-" + (Get-Date -Format "yyyyMMddHHmmss")
+$betBody1 = @{
+    providerId            = "provider-smoke"
+    externalTransactionId = $txId1
+    playerId              = $testPlayerId
+    walletId              = $testWalletId
+    roundId               = "round-smoke-001"
+    gameId                = "fortune-chimp"
+    kind                  = "BET"
+    money                 = @{ amount = "300.00"; currency = "BRL" }
 } | ConvertTo-Json
-$excessHeaders = @{ "Idempotency-Key" = "provider-smoke:$excessId" }
+$headers1 = @{ "Idempotency-Key" = "provider-smoke:$txId1" }
+
+$betResponse1 = Invoke-RestMethod -Uri "http://localhost:3000/wagering/transactions" `
+    -Method Post -Headers $headers1 -ContentType "application/json" -Body $betBody1
+$betResponse1 | Format-List
+```
+
+> Resultado contábil: saldo reduzido atomicamente de R$ 100.000,00 para **R$ 99.700,00**.
+
+---
+
+#### Passo 4 — Débitos subsequentes (R$ 30,00 e R$ 80.000,00)
+
+```powershell
+# Débito de R$ 30,00
+$txId2 = "tx-30-" + (Get-Date -Format "yyyyMMddHHmmss")
+$betBody2 = @{
+    providerId            = "provider-smoke"
+    externalTransactionId = $txId2
+    playerId              = $testPlayerId
+    walletId              = $testWalletId
+    roundId               = "round-smoke-002"
+    gameId                = "fortune-chimp"
+    kind                  = "BET"
+    money                 = @{ amount = "30.00"; currency = "BRL" }
+} | ConvertTo-Json
+$headers2 = @{ "Idempotency-Key" = "provider-smoke:$txId2" }
+$betResponse2 = Invoke-RestMethod -Uri "http://localhost:3000/wagering/transactions" `
+    -Method Post -Headers $headers2 -ContentType "application/json" -Body $betBody2
+$betResponse2 | Format-List
+
+# Débito de R$ 80.000,00
+$txId3 = "tx-80k-" + (Get-Date -Format "yyyyMMddHHmmss")
+$betBody3 = @{
+    providerId            = "provider-smoke"
+    externalTransactionId = $txId3
+    playerId              = $testPlayerId
+    walletId              = $testWalletId
+    roundId               = "round-smoke-003"
+    gameId                = "fortune-chimp"
+    kind                  = "BET"
+    money                 = @{ amount = "80000.00"; currency = "BRL" }
+} | ConvertTo-Json
+$headers3 = @{ "Idempotency-Key" = "provider-smoke:$txId3" }
+$betResponse3 = Invoke-RestMethod -Uri "http://localhost:3000/wagering/transactions" `
+    -Method Post -Headers $headers3 -ContentType "application/json" -Body $betBody3
+$betResponse3 | Format-List
+```
+
+> Resultado acumulado: saldo residual consolidado em **R$ 19.640,00 BRL**.
+
+---
+
+#### Passo 5 — Rejeição por saldo insuficiente
+
+Tentativa de nova aposta de R$ 80.000,00 com saldo disponível de apenas R$ 19.640,00:
+
+```powershell
+$excessTxId = "tx-excess-" + (Get-Date -Format "yyyyMMddHHmmss")
+$excessBody = @{
+    providerId            = "provider-smoke"
+    externalTransactionId = $excessTxId
+    playerId              = $testPlayerId
+    walletId              = $testWalletId
+    roundId               = "round-smoke-004"
+    gameId                = "fortune-chimp"
+    kind                  = "BET"
+    money                 = @{ amount = "80000.00"; currency = "BRL" }
+} | ConvertTo-Json
+$excessHeaders = @{ "Idempotency-Key" = "provider-smoke:$excessTxId" }
 
 try {
-    Invoke-RestMethod `
-        -Uri "http://localhost:3000/wagering/transactions" `
-        -Method Post `
-        -Headers $excessHeaders `
-        -ContentType "application/json" `
-        -Body $excessBody
+    Invoke-RestMethod -Uri "http://localhost:3000/wagering/transactions" `
+        -Method Post -Headers $excessHeaders -ContentType "application/json" -Body $excessBody
 } catch {
+    Write-Host "Status retornado:" $_.Exception.Response.StatusCode.value__
     $_.ErrorDetails.Message
 }
 ```
 
-O resultado esperado é HTTP `422`, status `REJECTED` e saldo preservado em `70.00`.
+Saída esperada:
+
+```
+Status retornado: 422
+{"transactionId":"67dcd598-736d-4865-8d3c-7fa3552287e7","status":"REJECTED","balance":{"amount":"19640.00","currency":"BRL"},"idempotentReplay":false,"failureCode":"INSUFFICIENT_FUNDS"}
+```
+
+---
+
+#### Passo 6 — Auditar o livro-razão (ledger imutável)
+
+```powershell
+(Invoke-RestMethod -Uri "http://localhost:3000/wallets/$testWalletId/ledger").items |
+    Format-Table direction, amount, balanceBefore, balanceAfter, createdAt
+```
+
+Saída do extrato auditado:
+
+```
+direction amount                            balanceBefore                      balanceAfter                       createdAt
+--------- ------                            -------------                      ------------                       ---------
+DEBIT     @{amount=80000.00; currency=BRL}  @{amount=99640.00; currency=BRL}  @{amount=19640.00; currency=BRL}  2026-09-04 15:49:16.689+00
+DEBIT     @{amount=30.00; currency=BRL}     @{amount=99670.00; currency=BRL}  @{amount=99640.00; currency=BRL}  2026-09-04 15:48:38.475+00
+DEBIT     @{amount=30.00; currency=BRL}     @{amount=99700.00; currency=BRL}  @{amount=99670.00; currency=BRL}  2026-09-04 15:48:23.024+00
+DEBIT     @{amount=300.00; currency=BRL}    @{amount=100000.00; currency=BRL} @{amount=99700.00; currency=BRL}  2026-09-04 15:45:35.91+00
+CREDIT    @{amount=100000.00; currency=BRL} @{amount=0.00; currency=BRL}      @{amount=100000.00; currency=BRL} 2026-09-04 15:44:47.439+00
+```
+
+> A tentativa rejeitada por saldo insuficiente **não produz lançamento no ledger**, garantindo que o extrato registre apenas mutações financeiras reais.
+
+---
+
+#### Passo 7 — Reconciliação matemática final
+
+```powershell
+Invoke-RestMethod -Uri "http://localhost:3000/wallets/$testWalletId/reconciliation" -Method Post |
+    Format-List
+```
+
+Saída esperada:
+
+```
+walletId          : e9da796b-4bcb-4326-bc5d-8a4cb6601304
+storedBalance     : @{amount=19640.00; currency=BRL}
+calculatedBalance : @{amount=19640.00; currency=BRL}
+difference        : @{amount=0.00; currency=BRL}
+consistent        : True
+checkedEntries    : 5
+```
+
+---
+
+#### Passo 8 — Comprovação da trigger de imutabilidade no PostgreSQL
+
+```powershell
+docker exec -it wagering-postgres psql -U postgres -d wagering_db -c "UPDATE ledger_entries SET amount = 99999 WHERE 1=1;"
+```
+
+Resposta gerada pelo motor PostgreSQL:
+
+```
+ERROR: Operação inválida: lançamentos no livro-razão (ledger) são imutáveis e puramente cumulativos (append-only).
+CONTEXT: PL/pgSQL function prevent_ledger_modification() line 3 at RAISE
+```
+
+---
+
+### Execução via cURL (Linux / macOS / Git Bash)
+
+#### 1. Criar carteira
+
+```bash
+WALLET_RESP=$(curl -s -X POST http://localhost:3000/wallets \
+  -H "Content-Type: application/json" \
+  -d '{"playerId": "player-linux-001", "initialBalance": {"amount": "100000.00", "currency": "BRL"}}')
+
+echo $WALLET_RESP
+WALLET_ID=$(echo $WALLET_RESP | jq -r .id)
+PLAYER_ID=$(echo $WALLET_RESP | jq -r .playerId)
+```
+
+#### 2. Submeter aposta de R$ 300,00
+
+```bash
+curl -s -X POST http://localhost:3000/wagering/transactions \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: provider-linux:tx-001" \
+  -d "{
+    \"providerId\": \"provider-linux\",
+    \"externalTransactionId\": \"tx-001\",
+    \"playerId\": \"$PLAYER_ID\",
+    \"walletId\": \"$WALLET_ID\",
+    \"roundId\": \"round-001\",
+    \"gameId\": \"fortune-chimp\",
+    \"kind\": \"BET\",
+    \"money\": {\"amount\": \"300.00\", \"currency\": \"BRL\"}
+  }" | jq .
+```
+
+#### 3. Consultar extrato contábil
+
+```bash
+curl -s "http://localhost:3000/wallets/$WALLET_ID/ledger?limit=50" | jq .
+```
+
+#### 4. Reconciliação contábil
+
+```bash
+curl -s -X POST "http://localhost:3000/wallets/$WALLET_ID/reconciliation" | jq .
+```
+
+---
 
 ## Autenticação
 
 A Seção 2 do desafio técnico não pontua autenticação. O comportamento padrão usa `NoopAuthGuard`, permitindo testes locais e uso do Swagger sem token prévio.
 
-Para extensibilidade, o projeto inclui `JwtAuthGuard` baseado em JWKS RS256 e uma instância Zitadel no Compose. Para usar autenticação real, ative o guard nos controllers, configure `IDP_ISSUER` e `IDP_JWKS_URI` e gere credenciais na mesma instância Zitadel. Credenciais de outra instalação retornam `invalid_client`.
+Para extensibilidade, o projeto inclui `JwtAuthGuard` baseado em JWKS RS256 e uma instância Zitadel no Compose. Para usar autenticação real:
 
-Os logs do bootstrap e dos workers são emitidos como JSON com `correlationId`, `messageId`, `transactionId`, `walletId` e `providerId`. A métrica `db_lock_conflicts_total` é incrementada para deadlocks (`40P01`), lock timeout (`55P03`) e mensagens de timeout/deadlock reconhecidas.
+1. Ative o guard nos controllers.
+2. Configure `IDP_ISSUER` e `IDP_JWKS_URI`.
+3. Gere credenciais na mesma instância Zitadel.
 
-## Organização do código
+> Credenciais de outra instalação retornam `invalid_client`.
 
-```text
-src/domain/           Regras puras, Money, Wallet, Ledger e WagerRuleEngine
-src/application/      Casos de uso e background workers
-src/infrastructure/   Entidades MikroORM, migrations, SQS e Outbox
-src/interface/http/   Controllers REST, DTOs e interceptores
-tests/                 Suítes de domínio, integração, interface e concorrência
+---
+
+### Observabilidade
+
+Os logs do bootstrap e dos workers são emitidos como JSON estruturado com os campos:
+
+- `correlationId`
+- `messageId`
+- `transactionId`
+- `walletId`
+- `providerId`
+
+A métrica `db_lock_conflicts_total` é incrementada para:
+
+| Código PostgreSQL | Situação                    |
+|-------------------|-----------------------------|
+| `40P01`           | Deadlock                    |
+| `55P03`           | Lock timeout (NOWAIT)       |
+| —                 | Mensagens de timeout/deadlock reconhecidas via SQS |
+
+---
+
+## Organização do Código
+
+```
+src/
+├── domain/           # Regras puras: Money, Wallet, Ledger, WagerRuleEngine
+├── application/      # Casos de uso e background workers
+├── infrastructure/   # Entidades MikroORM, migrations, SQS e Outbox
+└── interface/http/   # Controllers REST, DTOs e interceptores
+
+tests/
+├── domain/           # Testes unitários de domínio
+├── integration/      # PostgreSQL + LocalStack (SQS, DLQ, crash recovery)
+└── concurrency/      # Workers independentes e processos OS reais
 ```
 
-O detalhamento das decisões arquiteturais, invariantes financeiras, trade-offs e limitações está em [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+---
+
+## Decisões Arquiteturais
+
+### Aritmética Monetária
+
+Todos os valores são armazenados e operados em **centavos como `BIGINT`** no PostgreSQL. A conversão para representação decimal ocorre apenas na camada de interface HTTP. Isso elimina erros de ponto flutuante em qualquer operação financeira.
+
+### Bloqueio Pessimista por Carteira
+
+A carteira é travada com `SELECT ... FOR UPDATE NOWAIT` no início de cada transação de saldo. Em caso de contenda, o PostgreSQL retorna imediatamente o erro `55P03`, que é tratado pelo retry-with-backoff da camada de aplicação — evitando filas de espera por lock e mantendo latência previsível sob carga.
+
+### Idempotência Persistente
+
+Cada requisição carrega um `Idempotency-Key` do provedor. A combinação `(provider_id, external_transaction_id)` é armazenada com constraint `UNIQUE` no banco. Tentativas de replay retornam a resposta original sem reprocessar a transação, garantindo exatamente-uma-vez semântico do ponto de vista financeiro.
+
+### Transactional Outbox
+
+Eventos de domínio (ex.: `TransactionApplied`) são gravados na tabela `outbox_events` **dentro da mesma transação** que muta o saldo. Um worker dedicado faz polling e publica no SQS. Isso garante que nunca haja evento publicado sem commit ou commit sem evento.
+
+### Ledger Append-Only
+
+A tabela `ledger_entries` possui uma trigger PostgreSQL que impede qualquer `UPDATE` ou `DELETE`. Cada mutação de saldo gera um novo lançamento com `balance_before` e `balance_after`, formando um histórico auditável e matematicamente reconciliável.
+
+### Inbox Deduplication no Consumer SQS
+
+O consumer verifica se o `message_id` SQS já foi processado (tabela `inbox_messages`) antes de executar o caso de uso. Mensagens duplicadas entregues pelo SQS (at-least-once delivery) são descartadas de forma segura. Mensagens poison que ultrapassam o limite de tentativas são encaminhadas automaticamente para a DLQ configurada no LocalStack.
+
+### Multi-Instance e Crash Recovery
+
+O lock pessimista combinado com o redelivery do SQS garante que, mesmo que um worker processe uma mensagem e sofra crash antes do ACK, outro worker retomará o processamento. O cenário é coberto pelo teste `crash-recovery-ack.spec.ts` e pelo teste de múltiplos processos OS `multi-process-os.spec.ts`.
