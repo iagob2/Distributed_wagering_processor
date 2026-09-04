@@ -5,6 +5,11 @@ import { EntityManager } from '@mikro-orm/postgresql';
 import { SQSClient, GetQueueUrlCommand } from '@aws-sdk/client-sqs';
 import { MetricsService } from '../../../common/metrics/metrics.service';
 
+
+import { ApiTags, ApiOperation } from '@nestjs/swagger';
+
+@ApiTags('Health & Ops')
+
 @Controller()
 export class HealthAndMetricsController {
     constructor(

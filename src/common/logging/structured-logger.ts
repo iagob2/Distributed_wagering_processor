@@ -1,4 +1,5 @@
 import { LoggerService } from '@nestjs/common';
+import { requestContext } from './request-context';
 
 type LogLevel = 'log' | 'error' | 'warn' | 'debug' | 'verbose';
 
@@ -33,11 +34,11 @@ export class StructuredLogger implements LoggerService {
 
     private write(level: LogLevel, message: unknown, context?: string, trace?: string): void {
         const metadata: LogContext = {
-            correlationId: null,
-            messageId: null,
-            transactionId: null,
-            walletId: null,
-            providerId: null,
+            correlationId: requestContext.getStore()?.correlationId ?? null,
+            messageId: requestContext.getStore()?.messageId ?? null,
+            transactionId: requestContext.getStore()?.transactionId ?? null,
+            walletId: requestContext.getStore()?.walletId ?? null,
+            providerId: requestContext.getStore()?.providerId ?? null,
         };
         const output = {
             timestamp: new Date().toISOString(),

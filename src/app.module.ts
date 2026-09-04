@@ -19,6 +19,7 @@ import { SubmitWagerTransactionService } from './application/services/submit-wag
 import { MetricsService } from './common/metrics/metrics.service';
 import { NoopAuthGuard } from './common/guards/noop-auth.guard';
 import { IdempotencyValidationInterceptor } from './common/interceptors/idempotency.interceptor';
+import { CorrelationInterceptor } from './common/interceptors/correlation.interceptor';
 import { OutboxPublisherWorker } from './infrastructure/messaging/outbox-publisher.worker';
 import { SqsWagerConsumerService } from './infrastructure/messaging/sqs-wager-consumer.service';
 import { PendingReferenceWorker } from './application/workers/pending-reference.worker';
@@ -106,6 +107,7 @@ class BackgroundPollersBootstrap implements OnModuleInit, OnModuleDestroy {
         MetricsService,
         NoopAuthGuard,
         IdempotencyValidationInterceptor,
+        CorrelationInterceptor,
         OutboxPublisherWorker,
         SqsWagerConsumerService, // O consumer inicia seu próprio polling via OnModuleInit
         PendingReferenceWorker,

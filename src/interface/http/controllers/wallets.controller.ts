@@ -10,6 +10,7 @@ import {
     ConflictException,
     NotFoundException,
 } from '@nestjs/common';
+
 import { EntityManager } from '@mikro-orm/postgresql';
 import { CreateWalletDto } from '../dto/wallet.dto';
 import { WalletDbEntity } from '../../../infrastructure/database/entities/wallet.db-entity';
@@ -24,11 +25,21 @@ import { WagerTransaction } from '../../../domain/entities/wager-transaction.ent
 import { WagerTransactionProcessed } from '../../../domain/events/integration-event';
 import { randomUUID } from 'crypto';
 
+import { ApiTags, ApiOperation, ApiBearerAuth, ApiParam, ApiQuery, ApiResponse } from '@nestjs/swagger';
+
+@ApiTags('Wallets')
+@ApiBearerAuth('bearer-token')
+
+
 @Controller('wallets')
 export class WalletsController {
     constructor(private readonly em: EntityManager) { }
 
     @Post()
+    @ApiOperation({
+        summary: 'Criar nova carteira',
+        description: 'Cria uma carteira única para o jogador com saldo inicial.',
+    })
     @HttpCode(HttpStatus.CREATED)
     public async createWallet(@Body() dto: CreateWalletDto) {
         const forkEm = this.em.fork();
@@ -146,6 +157,16 @@ export class WalletsController {
     }
 
     @Get(':walletId')
+    @ApiOperation({
+        summary: 'Consultar saldo da carteira',
+        description: 'Retorna o saldo materializado atual da carteira informada.',
+    })
+    @ApiParam({
+        name: 'walletId',
+        description: 'UUID da carteira criada anteriormente',
+        example: 'e9da796b-4bcb-4326-bc5d-8a4cb6601304',
+        required: true,
+    })
     public async getWallet(@Param('walletId') walletId: string) {
         const walletDb = await this.em.findOne(WalletDbEntity, { id: walletId });
         if (!walletDb) throw new NotFoundException(`Carteira ${walletId} não encontrada.`);
@@ -159,6 +180,24 @@ export class WalletsController {
     }
 
     @Get(':walletId/ledger')
+    @ApiOperation({
+        summary: 'Consultar extrato do Livro-Razão (Ledger)',
+        description: 'Retorna o histórico imutável de créditos e débitos com suporte a paginação por cursor.',
+    })
+    @ApiParam({
+        name: 'walletId',
+        description: 'UUID da carteira auditada',
+        example: 'e9da796b-4bcb-4326-bc5d-8a4cb6601304',
+        required: true,
+    })
+
+    @ApiQuery({
+        name: 'cursor',
+        description: 'Token Base64 para paginação. DEIXE EM BRANCO para buscar a primeira página do extrato.',
+        example: '',
+        required: false, // <-- Torna opcional no Swagger
+    })
+
     public async getLedger(
         @Param('walletId') walletId: string,
         @Query('cursor') cursor?: string,
@@ -213,6 +252,16 @@ export class WalletsController {
     }
 
     @Post(':walletId/reconciliation')
+    @ApiOperation({
+        summary: 'Reconciliação matemática da carteira',
+        description: 'Executa a prova real: Saldo Armazenado == Soma(Créditos) - Soma(Débitos).',
+    })
+    @ApiParam({
+        name: 'walletId',
+        description: 'UUID da carteira para conferência contábil',
+        example: 'e9da796b-4bcb-4326-bc5d-8a4cb6601304',
+        required: true,
+    })
     @HttpCode(HttpStatus.OK)
     public async reconcile(@Param('walletId') walletId: string) {
         const wallet = await this.em.findOne(WalletDbEntity, { id: walletId });

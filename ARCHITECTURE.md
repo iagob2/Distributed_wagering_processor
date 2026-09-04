@@ -214,7 +214,7 @@ bun run build
 bun test
 ```
 
-Resultado validado: **37 testes automatizados, 0 falhas**, incluindo os cenários multi-instância, crash recovery e DLQ.
+Resultado validado: **40 testes automatizados, 0 falhas e 229 asserções**, incluindo processos OS reais, multi-instância, crash recovery, conflito `55P03` e DLQ.
 
 ### Cenários críticos
 
@@ -224,6 +224,9 @@ Resultado validado: **37 testes automatizados, 0 falhas**, incluindo os cenário
 4. **Reconciliação contínua:** o endpoint confirma `difference = 0.00` quando o saldo e o ledger estão consistentes.
 5. **Três workers e crash recovery:** forks de EntityManager independentes disputam a mesma wallet; uma redelivery após commit sem ACK retorna replay e mantém um único débito.
 6. **Poison message:** mensagem inválida é encaminhada para uma DLQ FIFO temporária e incrementa `dlq_messages_total`.
+7. **Processos OS reais:** três subprocessos Bun iniciam seu próprio MikroORM e disputam a mesma wallet; somente uma aposta de R$ 60 é aprovada sobre saldo de R$ 100.
+8. **Crash recovery com consumer:** uma mensagem é processada e comitada sem ACK; após redelivery, o consumer oficial consulta o Inbox/idempotência e não repete o débito.
+9. **Lock conflict:** duas conexões PostgreSQL disputam a mesma linha com `FOR UPDATE NOWAIT`, comprovando o erro nativo `55P03`.
 
 ---
 
@@ -254,6 +257,9 @@ Get-Content src/infrastructure/database/migrations/001_initial_schema.sql | dock
 bun run build
 bun test
 bun test tests/concurrency/multi-instance-concurrency.spec.ts
+bun test tests/concurrency/multi-process-os.spec.ts
+bun test tests/integration/crash-recovery-ack.spec.ts
+bun test tests/integration/lock-conflict-55p03.spec.ts
 bun test tests/integration/sqs-dlq.integration.spec.ts
 
 # Carga curta reproduzível

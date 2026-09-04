@@ -18,6 +18,7 @@ import { CanonicalJsonHasher } from '../../common/utils/canonical-json-hasher.ut
 import { WagerTransactionKind } from '../../domain/entities/wager-transaction.entity';
 import { MetricsService } from '../../common/metrics/metrics.service';
 import { StructuredLogger } from '../../common/logging/structured-logger';
+import { requestContext } from '../../common/logging/request-context';
 
 export interface SqsMessageEnvelope {
     messageId: string;
@@ -112,6 +113,36 @@ export class SqsWagerConsumerService implements OnModuleInit, OnModuleDestroy {
     }
 
     private async handleMessage(message: Message): Promise<void> {
+        let contextData: Partial<{
+            correlationId: string;
+            messageId: string;
+            walletId: string;
+            providerId: string;
+            transactionId: string;
+        }> = {
+            correlationId: message.MessageId ?? crypto.randomUUID(),
+            messageId: message.MessageId ?? undefined,
+        };
+
+        try {
+            const parsed = message.Body ? JSON.parse(message.Body) as Partial<SqsMessageEnvelope> : undefined;
+            contextData = {
+                ...contextData,
+                correlationId: parsed?.messageId ?? contextData.correlationId,
+                walletId: parsed?.data?.walletId,
+                providerId: parsed?.data?.providerId,
+                transactionId: parsed?.data?.externalTransactionId,
+            };
+        } catch {
+            // O processamento normal registra a mensagem malformada e a envia à DLQ.
+        }
+
+        return await requestContext.run(contextData as { correlationId: string }, async () => {
+            await this.processMessage(message);
+        });
+    }
+
+    private async processMessage(message: Message): Promise<void> {
         this.activeJobs++;
         try {
             if (!message.Body || !message.ReceiptHandle) return;

@@ -15,13 +15,22 @@ import { EntityManager } from '@mikro-orm/postgresql';
 import { SubmitWagerDto } from '../dto/wager.dto';
 import { SubmitWagerTransactionService } from '../../../application/services/submit-wager-transaction.service';
 import { IdempotencyValidationInterceptor } from '../../../common/interceptors/idempotency.interceptor';
-import { NoopAuthGuard } from '../../../common/guards/noop-auth.guard';
+
+import { JwtAuthGuard } from '../../../common/guards/jwt-auth.guard';
+
 import { MetricsService } from '../../../common/metrics/metrics.service';
 import { WagerTransactionDbEntity } from '../../../infrastructure/database/entities/wager-transaction.db-entity';
 import { Money } from '../../../domain/value-objects/money.vo';
 
+import { ApiTags, ApiOperation, ApiBearerAuth, ApiSecurity, ApiHeader, ApiResponse } from '@nestjs/swagger';
+
+@ApiTags('Wagering')
+@ApiBearerAuth('bearer-token')
+@ApiSecurity('Idempotency-Key')
+
+
 @Controller()
-@UseGuards(NoopAuthGuard)
+@UseGuards(JwtAuthGuard)
 export class WageringController {
     constructor(
         private readonly submitService: SubmitWagerTransactionService,
@@ -30,6 +39,16 @@ export class WageringController {
     ) { }
 
     @Post('wagering/transactions')
+    @ApiOperation({
+        summary: 'Submeter transação de aposta',
+        description: 'Processa débitos (BET) e créditos (WIN/REFUND) com garantia de concorrência e idempotência.',
+    })
+    @ApiHeader({
+        name: 'idempotency-key',
+        description: 'Chave única de idempotência. Impede cobrança duplicada caso a mesma requisição seja reenviada.',
+        example: 'provider-smoke:tx-001',
+        required: true,
+    })
     @UseInterceptors(IdempotencyValidationInterceptor)
     public async submitTransaction(
         @Headers('idempotency-key') idempotencyKey: string,
