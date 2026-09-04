@@ -1,8 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { EntityManager } from '@mikro-orm/postgresql';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 import { OutboxEventDbEntity } from '../database/entities/outbox-event.db-entity';
 import { MetricsService } from '../../common/metrics/metrics.service';
+import { StructuredLogger } from '../../common/logging/structured-logger';
 
 /**
  * Publica eventos do Transactional Outbox para a fila de eventos (não a de ingestão).
@@ -14,7 +15,7 @@ import { MetricsService } from '../../common/metrics/metrics.service';
  */
 @Injectable()
 export class OutboxPublisherWorker {
-    private readonly logger = new Logger(OutboxPublisherWorker.name);
+    private readonly logger = new StructuredLogger();
     private readonly queueUrl =
         process.env.SQS_EVENTS_QUEUE_URL ||
         'http://localhost:4566/000000000000/wager-events.fifo';

@@ -8,6 +8,7 @@
         "format": "prettier --write \"src/**/*.ts\"",
         "start": "bun run src/main.ts",
         "start:dev": "nest start --watch",
+        "test:load": "bun run scripts/load-test.ts",
         "test": "bun test --path-ignore-patterns=dist/**",
         "test:watch": "bun test --watch --path-ignore-patterns=dist/**",
         "test:cov": "bun test --coverage --path-ignore-patterns=dist/**"

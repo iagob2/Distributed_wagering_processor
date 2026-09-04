@@ -1,12 +1,14 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe, Logger } from '@nestjs/common';
+import { ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
+import { StructuredLogger } from './common/logging/structured-logger';
 
 async function bootstrap() {
-    const logger = new Logger('Bootstrap');
+    const logger = new StructuredLogger();
     const app = await NestFactory.create(AppModule);
+    app.useLogger(logger);
     app.enableShutdownHooks();
 
     app.enableCors({

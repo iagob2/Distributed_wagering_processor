@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { EntityManager, LockMode } from '@mikro-orm/postgresql';
 import { randomUUID } from 'crypto';
 import { WagerTransactionDbEntity } from '../../infrastructure/database/entities/wager-transaction.db-entity';
@@ -23,6 +23,7 @@ import {
     WagerTransactionRejected,
 } from '../../domain/events/integration-event';
 import { MetricsService } from '../../common/metrics/metrics.service';
+import { StructuredLogger } from '../../common/logging/structured-logger';
 
 /**
  * Reprocessa PENDING_REFERENCE (REFUND/ROLLBACK que chegaram antes da BET).
@@ -30,7 +31,7 @@ import { MetricsService } from '../../common/metrics/metrics.service';
  */
 @Injectable()
 export class PendingReferenceWorker {
-    private readonly logger = new Logger(PendingReferenceWorker.name);
+    private readonly logger = new StructuredLogger();
 
     constructor(
         private readonly em: EntityManager,
