@@ -2,13 +2,13 @@ import {
     Injectable,
     OnModuleInit,
     OnModuleDestroy,
-    Logger,
 } from '@nestjs/common';
 import {
     SQSClient,
     ReceiveMessageCommand,
     DeleteMessageCommand,
     ChangeMessageVisibilityCommand,
+    SendMessageCommand,
     Message,
 } from '@aws-sdk/client-sqs';
 import { EntityManager } from '@mikro-orm/postgresql';
@@ -17,6 +17,7 @@ import { InboxMessageDbEntity } from '../database/entities/inbox-message.db-enti
 import { CanonicalJsonHasher } from '../../common/utils/canonical-json-hasher.util';
 import { WagerTransactionKind } from '../../domain/entities/wager-transaction.entity';
 import { MetricsService } from '../../common/metrics/metrics.service';
+import { StructuredLogger } from '../../common/logging/structured-logger';
 
 export interface SqsMessageEnvelope {
     messageId: string;
@@ -50,12 +51,15 @@ export interface SqsMessageEnvelope {
  */
 @Injectable()
 export class SqsWagerConsumerService implements OnModuleInit, OnModuleDestroy {
-    private readonly logger = new Logger(SqsWagerConsumerService.name);
+    private readonly logger = new StructuredLogger();
     private readonly consumerName = 'wager-engine-sqs-consumer';
     private readonly queueUrl =
         process.env.SQS_MAIN_QUEUE_URL ||
         'http://localhost:4566/000000000000/wager-transactions.fifo';
     private readonly dlqName = 'wager-transactions-dlq.fifo';
+    private readonly dlqUrl =
+        process.env.SQS_DLQ_URL ||
+        'http://localhost:4566/000000000000/wager-transactions-dlq.fifo';
 
     private isRunning = false;
     private activeJobs = 0;
@@ -116,14 +120,16 @@ export class SqsWagerConsumerService implements OnModuleInit, OnModuleDestroy {
             try {
                 envelope = JSON.parse(message.Body) as SqsMessageEnvelope;
             } catch {
-                this.logger.warn(`Mensagem malformada ${message.MessageId}. Descartando.`);
+                this.logger.warn(`Mensagem malformada ${message.MessageId}. Enviando para DLQ.`);
+                await this.moveToDlq(message);
                 await this.ack(message.ReceiptHandle);
                 return;
             }
 
             // Eventos de outbox não devem ser reprocessados como apostas.
             if (!envelope.data?.walletId || !envelope.data?.idempotencyKey) {
-                this.logger.warn(`Envelope sem payload de aposta ${message.MessageId}. ACK.`);
+                this.logger.warn(`Envelope sem payload de aposta ${message.MessageId}. Enviando para DLQ.`);
+                await this.moveToDlq(message);
                 await this.ack(message.ReceiptHandle);
                 return;
             }
@@ -199,6 +205,18 @@ export class SqsWagerConsumerService implements OnModuleInit, OnModuleDestroy {
                 ReceiptHandle: receiptHandle,
             }),
         );
+    }
+
+    private async moveToDlq(message: Message): Promise<void> {
+        await this.sqsClient.send(
+            new SendMessageCommand({
+                QueueUrl: this.dlqUrl,
+                MessageBody: message.Body ?? '',
+                MessageGroupId: 'poison-messages',
+                MessageDeduplicationId: message.MessageId ?? crypto.randomUUID(),
+            }),
+        );
+        this.metrics.dlqMessagesTotal.inc({ queue_name: this.dlqName });
     }
 
     private isTerminalBusinessError(error: { code?: string; status?: number }): boolean {
