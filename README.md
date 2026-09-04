@@ -540,32 +540,16 @@ tests/
 
 ---
 
-## Decisões Arquiteturais
+### Visão geral dos pilares
 
-### Aritmética Monetária
+| Pilar                        | Abordagem resumida                                                                 |
+|------------------------------|------------------------------------------------------------------------------------|
+| **Aritmética monetária**     | Valores em centavos como `BIGINT` no PostgreSQL; decimal apenas na camada HTTP     |
+| **Bloqueio por carteira**    | `SELECT ... FOR UPDATE NOWAIT` com retry-and-backoff no código de aplicação        |
+| **Idempotência persistente** | Constraint `UNIQUE (provider_id, external_transaction_id)` + replay da resposta original |
+| **Transactional Outbox**     | Evento gravado na mesma transação que muta o saldo; worker faz polling para o SQS  |
+| **Ledger append-only**       | Trigger PostgreSQL bloqueia qualquer `UPDATE`/`DELETE` na tabela `ledger_entries`  |
+| **Inbox deduplication**      | Consumer verifica `message_id` antes de executar; mensagens poison vão para a DLQ  |
+| **Crash recovery**           | Lock pessimista + redelivery SQS garantem retomada segura após falha sem ACK       |
 
-Todos os valores são armazenados e operados em **centavos como `BIGINT`** no PostgreSQL. A conversão para representação decimal ocorre apenas na camada de interface HTTP. Isso elimina erros de ponto flutuante em qualquer operação financeira.
-
-### Bloqueio Pessimista por Carteira
-
-A carteira é travada com `SELECT ... FOR UPDATE NOWAIT` no início de cada transação de saldo. Em caso de contenda, o PostgreSQL retorna imediatamente o erro `55P03`, que é tratado pelo retry-with-backoff da camada de aplicação — evitando filas de espera por lock e mantendo latência previsível sob carga.
-
-### Idempotência Persistente
-
-Cada requisição carrega um `Idempotency-Key` do provedor. A combinação `(provider_id, external_transaction_id)` é armazenada com constraint `UNIQUE` no banco. Tentativas de replay retornam a resposta original sem reprocessar a transação, garantindo exatamente-uma-vez semântico do ponto de vista financeiro.
-
-### Transactional Outbox
-
-Eventos de domínio (ex.: `TransactionApplied`) são gravados na tabela `outbox_events` **dentro da mesma transação** que muta o saldo. Um worker dedicado faz polling e publica no SQS. Isso garante que nunca haja evento publicado sem commit ou commit sem evento.
-
-### Ledger Append-Only
-
-A tabela `ledger_entries` possui uma trigger PostgreSQL que impede qualquer `UPDATE` ou `DELETE`. Cada mutação de saldo gera um novo lançamento com `balance_before` e `balance_after`, formando um histórico auditável e matematicamente reconciliável.
-
-### Inbox Deduplication no Consumer SQS
-
-O consumer verifica se o `message_id` SQS já foi processado (tabela `inbox_messages`) antes de executar o caso de uso. Mensagens duplicadas entregues pelo SQS (at-least-once delivery) são descartadas de forma segura. Mensagens poison que ultrapassam o limite de tentativas são encaminhadas automaticamente para a DLQ configurada no LocalStack.
-
-### Multi-Instance e Crash Recovery
-
-O lock pessimista combinado com o redelivery do SQS garante que, mesmo que um worker processe uma mensagem e sofra crash antes do ACK, outro worker retomará o processamento. O cenário é coberto pelo teste `crash-recovery-ack.spec.ts` e pelo teste de múltiplos processos OS `multi-process-os.spec.ts`.
+> Para a análise completa de cada decisão, consulte [`ARCHITECTURE.md`](./ARCHITECTURE.md).
