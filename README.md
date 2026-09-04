@@ -24,12 +24,14 @@ Serviço financeiro distribuído para iGaming, desenvolvido para o desafio técn
 
 ### 1. Instalar dependências
 
+Windows PowerShell:
+
 ```powershell
 bun install
 Copy-Item .env.example .env
 ```
 
-No Linux/macOS:
+Linux/macOS:
 
 ```bash
 bun install
@@ -43,11 +45,11 @@ docker compose up -d
 docker ps
 ```
 
-Aguarde `wagering-postgres` e `wagering-localstack` com status `healthy`. O `wagering-zitadel` é um ponto de extensão opcional para autenticação OIDC.
+Aguarde `wagering-postgres` e `wagering-localstack` ficarem com status `healthy`. O `wagering-zitadel` é um ponto de extensão opcional para autenticação OIDC.
 
 ### 3. Aplicar a migration
 
-Execute uma vez, depois que o PostgreSQL estiver saudável.
+Execute uma vez, assim que o PostgreSQL estiver saudável.
 
 Windows PowerShell:
 
@@ -61,7 +63,7 @@ Linux/macOS:
 docker exec -i wagering-postgres psql -U postgres -d wagering_db < src/infrastructure/database/migrations/001_initial_schema.sql
 ```
 
-A migration aplica `BIGINT` para centavos, `CHECK (balance >= 0)`, unicidade de wallet por `(player_id, currency)`, unicidade de transação por `(provider_id, external_transaction_id)`, constraints aritméticas do ledger e trigger contra `UPDATE`/`DELETE` no ledger.
+A migration aplica `BIGINT` para centavos, `CHECK (balance >= 0)`, unicidade de carteira por `(player_id, currency)`, unicidade de transação por `(provider_id, external_transaction_id)`, constraints aritméticas do ledger e trigger contra `UPDATE`/`DELETE` no ledger.
 
 ### 4. Iniciar a API
 
@@ -71,17 +73,22 @@ bun run start
 
 Endpoints locais:
 
-- Swagger: http://localhost:3000/docs
+- Swagger UI: http://localhost:3000/docs
 - Liveness: http://localhost:3000/health/live
 - Readiness: http://localhost:3000/health/ready
 - Métricas: http://localhost:3000/metrics
 
-Se aparecer `EADDRINUSE`, encerre a instância anterior do Bun ou libere a porta `3000` antes de executar novamente.
+Se aparecer o erro `EADDRINUSE`, encerre instâncias anteriores do Bun ou libere a porta `3000` antes de executar novamente:
+
+```powershell
+Get-NetTCPConnection -LocalPort 3000 -State Listen
+Stop-Process -Id <PID> -Force
+```
 
 ## Build e testes
 
 ```bash
-# Compilação sem gerar testes em dist/
+# Compilação limpa sem gerar testes em dist/
 bun run build
 
 # Suíte completa: domínio, integração, interface e concorrência
@@ -100,13 +107,13 @@ bun test tests/integration
 bun test tests/concurrency
 ```
 
-A suíte validada localmente contém 34 testes e cobre:
+A suíte cobre:
 
-- `Money`, `Wallet`, máquina de estados e regras `BET/WIN/LOSS/REFUND/ROLLBACK`;
-- disputa de duas apostas de `80.00` sobre saldo `100.00`;
-- rajada de 50 requisições com a mesma idempotency key;
-- Outbox, SQS e Inbox;
-- reconciliação entre saldo materializado e ledger.
+- Value Object `Money`, Aggregate Root `Wallet`, máquina de estados e regras `BET/WIN/LOSS/REFUND/ROLLBACK`;
+- disputa concorrente de duas apostas de `80.00` sobre saldo inicial de `100.00`;
+- rajada concorrente de 50 requisições com a mesma `Idempotency-Key`;
+- padrões Transactional Outbox, AWS SQS e Inbox Deduplication;
+- reconciliação matemática entre o saldo materializado da carteira e os lançamentos do ledger.
 
 O script `bun run build` usa `tsc` diretamente e exclui `tests/`, evitando que o Bun execute cópias compiladas dos testes.
 
@@ -132,14 +139,7 @@ curl -s -X POST http://localhost:3000/wallets \
   }'
 ```
 
-Copie o campo `id` retornado e defina-o como `WALLET_ID`.
-
-PowerShell:
-
-```powershell
-$walletId = "COLE_O_ID_DA_CARTEIRA"
-$playerId = "jogador-smoke-001"
-```
+Copie o campo `id` retornado e substitua `WALLET_ID` nos comandos seguintes.
 
 ### Submeter uma aposta
 
@@ -161,29 +161,105 @@ curl -s -X POST http://localhost:3000/wagering/transactions \
 
 A resposta esperada é `200`, com status `PROCESSED`, saldo `70.00` e `idempotentReplay: false`. Repetir a mesma chamada deve retornar a resposta original com `idempotentReplay: true`.
 
-### Consultar ledger e reconciliação
+### Criar carteira e apostar no Windows PowerShell
+
+```powershell
+$playerId = "player-smoke-" + (Get-Date -Format "yyyyMMddHHmmss")
+$createBody = @{
+    playerId = $playerId
+    initialBalance = @{
+        amount = "100.00"
+        currency = "BRL"
+    }
+} | ConvertTo-Json
+
+$wallet = Invoke-RestMethod `
+    -Uri "http://localhost:3000/wallets" `
+    -Method Post `
+    -ContentType "application/json" `
+    -Body $createBody
+
+$walletId = $wallet.id
+$txId = "tx-" + (Get-Date -Format "yyyyMMddHHmmss")
+$betBody = @{
+    providerId = "provider-smoke"
+    externalTransactionId = $txId
+    playerId = $playerId
+    walletId = $walletId
+    roundId = "round-smoke-001"
+    gameId = "fortune-chimp"
+    kind = "BET"
+    money = @{
+        amount = "30.00"
+        currency = "BRL"
+    }
+} | ConvertTo-Json
+$headers = @{ "Idempotency-Key" = "provider-smoke:$txId" }
+
+Invoke-RestMethod `
+    -Uri "http://localhost:3000/wagering/transactions" `
+    -Method Post `
+    -Headers $headers `
+    -ContentType "application/json" `
+    -Body $betBody | Format-List
+```
+
+### Reconciliação e ledger
 
 ```bash
 curl -s "http://localhost:3000/wallets/WALLET_ID/ledger?limit=50"
 curl -s -X POST http://localhost:3000/wallets/WALLET_ID/reconciliation
 ```
 
-A reconciliação deve retornar `consistent: true`, saldo armazenado `70.00`, saldo calculado `70.00` e dois lançamentos: abertura `CREDIT` e aposta `DEBIT`.
+A reconciliação deve retornar `consistent: true`, saldo armazenado `70.00`, saldo calculado `70.00` e dois lançamentos: abertura `CREDIT` e aposta `DEBIT`. A aposta rejeitada por saldo insuficiente não gera lançamento.
+
+### Testar saldo insuficiente no PowerShell
+
+```powershell
+$excessId = "tx-excess-" + (Get-Date -Format "yyyyMMddHHmmss")
+$excessBody = @{
+    providerId = "provider-smoke"
+    externalTransactionId = $excessId
+    playerId = $playerId
+    walletId = $walletId
+    roundId = "round-smoke-002"
+    gameId = "fortune-chimp"
+    kind = "BET"
+    money = @{
+        amount = "80.00"
+        currency = "BRL"
+    }
+} | ConvertTo-Json
+$excessHeaders = @{ "Idempotency-Key" = "provider-smoke:$excessId" }
+
+try {
+    Invoke-RestMethod `
+        -Uri "http://localhost:3000/wagering/transactions" `
+        -Method Post `
+        -Headers $excessHeaders `
+        -ContentType "application/json" `
+        -Body $excessBody
+} catch {
+    $_.ErrorDetails.Message
+}
+```
+
+O resultado esperado é HTTP `422`, status `REJECTED` e saldo preservado em `70.00`.
 
 ## Autenticação
 
-A Seção 2 do desafio não pontua autenticação. O comportamento padrão local usa `NoopAuthGuard`, deixando o motor testável sem depender de token.
+A Seção 2 do desafio técnico não pontua autenticação. O comportamento padrão usa `NoopAuthGuard`, permitindo testes locais e uso do Swagger sem token prévio.
 
-Existe uma extensão `JwtAuthGuard` baseada em JWKS RS256 e configuração Zitadel no Compose. Para ativá-la em um ambiente real, substitua o guard nos controllers, configure `IDP_ISSUER`/`IDP_JWKS_URI` e gere credenciais na mesma instância Zitadel. Credenciais de outra instância retornam `invalid_client`.
+Para extensibilidade, o projeto inclui `JwtAuthGuard` baseado em JWKS RS256 e uma instância Zitadel no Compose. Para usar autenticação real, ative o guard nos controllers, configure `IDP_ISSUER` e `IDP_JWKS_URI` e gere credenciais na mesma instância Zitadel. Credenciais de outra instalação retornam `invalid_client`.
 
-## Organização
+## Organização do código
 
 ```text
-src/domain/           regras puras, Money, Wallet, ledger e WagerRuleEngine
-src/application/      use cases e workers
-src/infrastructure/   entidades MikroORM, migration, SQS e Outbox
-src/interface/http/   controllers e DTOs
-tests/                 domínio, integração, interface e concorrência
+src/domain/           Regras puras, Money, Wallet, Ledger e WagerRuleEngine
+src/application/      Casos de uso e background workers
+src/infrastructure/   Entidades MikroORM, migrations, SQS e Outbox
+src/interface/http/   Controllers REST, DTOs e interceptores
+tests/                 Suítes de domínio, integração, interface e concorrência
 ```
 
-As decisões, invariantes, trade-offs e limitações estão em [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+O detalhamento das decisões arquiteturais, invariantes financeiras, trade-offs e limitações está em [`ARCHITECTURE.md`](./ARCHITECTURE.md).
